@@ -1,0 +1,4 @@
+*.o
+*.a
+config.json
+.DS_Store

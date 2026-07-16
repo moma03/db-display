@@ -1,0 +1,23 @@
+{
+  "matrix_options": {
+    "rows": 64,
+    "cols": 128,
+    "chain_length": 2,
+    "parallel": 2,
+    "multiplexing": 0,
+    "pwm_bits": 4,
+    "pwm_dither_bits": 1,
+    "brightness": 100,
+    "gpio_slowdown": 1,
+    "show_refresh_rate": true,
+    "limit_refresh_rate_hz": 190
+  },
+  "database": {
+    "host": "localhost",
+    "port": 5442,
+    "dbname": "stationsdb",
+    "user": "CHANGE_ME",
+    "password": "CHANGE_ME",
+    "eva": 8000297
+  }
+}

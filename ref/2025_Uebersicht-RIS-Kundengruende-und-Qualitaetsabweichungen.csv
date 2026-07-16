@@ -1,0 +1,102 @@
+﻿;R= Kundengrund   Q= Qualitätsabweichung;;;;;
+Code;Typ;Gesamtliste (alle EVU);Rücknahme durch Code..;IRIS+ Anzeige;IRIS+ Ansage;Änderung zum 14.12.25
+0;R;Keine Verspätungsbegründung;;;;
+1;R;Nähere Informationen in Kürze;;;ja;Schreibweise
+2;R;Polizeieinsatz;;;ja;
+3;R;Feuerwehreinsatz auf der Strecke;;;ja;
+4;R;;;;ja;
+5;R;Ärztliche Versorgung eines Fahrgastes;;;ja;Schreibweise
+6;R;Unbefugtes Ziehen der Notbremse;;;ja;Schreibweise
+7;R;Unbefugte Personen auf der Strecke;;;ja;Schreibweise
+8;R;Notarzteinsatz auf der Strecke;;;ja;
+9;R;Streikauswirkungen;;;ja;
+10;R;Tiere auf der Strecke;;;ja;
+11;R;Unwetter;;;ja;
+12;R;Warten auf ein verspätetes Schiff;;;ja;
+13;R;Pass- und Zollkontrolle;;;ja;
+14;R;Technischer Defekt am Bahnhof;;;ja;Schreibweise
+15;R;Beeinträchtigung durch Vandalismus;;;ja;
+16;R;Entschärfung einer Fliegerbombe;;;ja;
+17;R;Beschädigung einer Brücke;;;ja;
+18;R;Umgestürzter Baum auf der Strecke;;;ja;Schreibweise
+19;R;Unfall an einem Bahnübergang;;;ja;
+20;R;;;;ja;
+21;R;Warten auf Anschlussreisende;;;ja;
+22;R;Witterungsbedingte Beeinträchtigungen;;;ja;Schreibweise
+23;R;;;;ja;Löschung
+24;R;Verspätung im Ausland;;;ja;
+25;R;Bereitstellung weiterer Wagen;;;ja;
+26;R;Abhängen von Wagen;;;ja;
+27;R;Technische Störung am Bus;;;ja;Schreibweise
+28;R;Gegenstände auf der Strecke;;;ja;
+29;R;Ersatzverkehr mit Bus ist eingerichtet;;;ja;
+30;R;Personalausfall im Stellwerk;;;ja;Neu
+31;R;Bauarbeiten;;;ja;
+32;R;Längere Haltezeit am Bahnhof;;;ja;Schreibweise
+33;R;Reparatur an der Oberleitung;;;ja;
+34;R;Reparatur an einem Signal;;;ja;
+35;R;Streckensperrung;;;ja;
+36;R;Technische Störung am Zug;;;ja;Schreibweise
+37;R;Kurzfristiger Fahrzeugausfall;;;ja;Schreibweise
+38;R;Reparatur an der Strecke;;;ja;
+39;R;Stau / Hohes Verkehrsaufkommen;;;ja;
+40;R;Defektes Stellwerk;;;ja;Schreibweise
+41;R;Technischer Defekt an einem Bahnübergang;;;ja;Schreibweise
+42;R;Vorübergehend verminderte Geschwindigkeit auf der Strecke;;;ja;Schreibweise
+43;R;Verspätung eines vorausfahrenden Zuges;;;ja;
+44;R;Warten auf einen entgegenkommenden Zug;;;ja;
+45;R;Vorfahrt eines anderen Zuges;;;ja;
+46;R;;;;ja;
+47;R;Verspätete Bereitstellung des Zuges;;;ja;Schreibweise
+48;R;Verspätung aus vorheriger Fahrt;;;ja;
+49;R;Kurzfristiger Personalausfall;;;ja;Schreibweise
+50;R;Kurzfristige Erkrankung von Personal;;;ja;Schreibweise
+51;R;Verspätetes Personal aus vorheriger Fahrt;;;ja;Schreibweise
+52;R;Streik;;;ja;
+53;R;Unwetterauswirkungen;;;ja;
+54;R;Verfügbarkeit der Gleise derzeit eingeschränkt;;;ja;
+55;R;Technischer Defekt an einem anderen Zug;;;ja;Schreibweise
+56;R;Laden der Antriebsbatterie;;;ja;Neu
+57;R;Zusätzlicher Halt zum Ein- und Ausstieg;;;ja;Schreibweise
+58;R;Umleitung des Zuges;;;ja;
+59;R;Schnee und Eis;;;ja;
+60;R;Witterungsbedingt verminderte Geschwindigkeit;;;ja;Schreibweise
+61;R;Defekte Tür;;;ja;Schreibweise
+62;R;Behobener technischer Defekt am Zug;;;ja;Schreibweise
+63;R;Technische Untersuchung am Zug;;;ja;Schreibweise
+64;R;Reparatur an einer Weiche;;;ja;
+65;R;Erdrutsch;;;ja;
+66;R;Hochwasser;;;ja;
+67;R;Behördliche Maßnahme;;;ja;Schreibweise
+68;R;Hohes Fahrgastaufkommen verlängert Ein- und Ausstieg;;;ja;Schreibweise
+69;R;Zug verkehrt mit verminderter Geschwindigkeit;;;ja;
+70;Q;WLAN nicht verfügbar;88;;;
+71;Q;Eingeschränktes WLAN;88;;;Schreibweise
+72;Q;Info-/Entertainment nicht verfügbar;88;;;
+73;Q;Heute: Mehrzweckabteil vorne;84;;ja;
+74;Q;Heute: Mehrzweckabteil hinten;84;;ja;
+75;Q;Heute: 1. Klasse vorne;84;;ja;
+76;Q;Heute: 1. Klasse hinten;84;;ja;
+77;Q;1. Klasse fehlt;88;;ja;
+78;Q;Ersatzverkehr mit Bus ist eingerichtet;88;ja;;
+79;Q;Mehrzweckabteil fehlt;88;;ja;
+80;Q;Andere Reihenfolge der Wagen;84;ja;;Schreibweise
+81;Q;;;;;Löschung
+82;Q;Mehrere Wagen fehlen;88;ja;;Schreibweise
+83;Q;Heute ohne fahrzeuggebundene Einstiegshilfe;88;ja;ja;Änderung
+84;Q;Zug verkehrt richtig gereiht;;;;
+85;Q;Ein Wagen fehlt;88;ja;;Schreibweise
+86;Q;Gesamter Zug ohne Reservierung;89;ja;;Schreibweise
+87;Q;Einzelne Wagen ohne Reservierung;89;ja;;Schreibweise
+88;Q;Keine Qualitätsmängel;;;ja;Schreibweise
+89;Q;Reservierungen sind wieder vorhanden;;;;
+90;Q;Kein gastronomisches Angebot;88;ja;ja;Schreibweise
+91;Q;Fahrradmitnahme nicht möglich;88;ja;ja;
+92;Q;Fahrradmitnahme kann nicht garantiert werden;88;ja;ja;Änderung
+93;Q;Behindertengerechte Einrichtung fehlt;88;ja;ja;
+94;Q;Ersatzbewirtschaftung;88;ja;ja;
+95;Q;Universaltoilette fehlt;88;ja;ja;Änderung
+96;Q;Zustieg kann nicht garantiert werden;88;ja;;Änderung
+97;Q;Hohe Auslastung;88;ja;;Änderung
+98;Q;Sonstige Qualitätsmängel;88;;;Schreibweise
+99;R;Verzögerungen im Betriebsablauf;;;ja;
