@@ -16,6 +16,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
+#include <cstdlib>
 
 #include "led-matrix.h"
 #include "graphics.h"
@@ -307,19 +308,26 @@ static void buildScrollers(ScrollerState &ss,
 int main(int argc, char **argv) {
     // --- Parse CLI flags ---
     bool debugMode = false;
+    int evaOverride = 0;  // 0 means "not given on the command line"
     for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "--debug") == 0) debugMode = true;
+        if (strcmp(argv[i], "--debug") == 0) {
+            debugMode = true;
+        } else if (strcmp(argv[i], "--eva") == 0 && i + 1 < argc) {
+            evaOverride = std::atoi(argv[++i]);
+        }
     }
 
     // --- Matrix setup ---
     RGBMatrix::Options matrix_options;
     rgb_matrix::RuntimeOptions runtime_options;
 
-    if (!LoadConfigFromFile("config.json", matrix_options, runtime_options)) {
-        matrix_options.rows = 32;
-        matrix_options.cols = 64;
-        matrix_options.chain_length = 1;
-        matrix_options.parallel = 1;
+    matrix_options.rows = 32;
+    matrix_options.cols = 64;
+    matrix_options.chain_length = 1;
+    matrix_options.parallel = 1;
+    if (!LoadConfigWithCliOverrides(&argc, &argv, "config.json", matrix_options, runtime_options)) {
+        rgb_matrix::PrintMatrixFlags(stderr);
+        return 1;
     }
 
     RGBMatrix *matrix = RGBMatrix::CreateFromOptions(matrix_options, runtime_options);
@@ -343,6 +351,9 @@ int main(int argc, char **argv) {
     if (!debugMode) {
         if (!LoadDBConnectionConfig("config.json", dbCfg)) {
             cerr << "Warning: No 'database' section in config.json, using defaults" << endl;
+        }
+        if (evaOverride != 0) {
+            dbCfg.eva = evaOverride;
         }
         cout << "Live mode: connecting to " << dbCfg.host << ":" << dbCfg.port
              << "/" << dbCfg.dbname << " (EVA " << dbCfg.eva << ")" << endl;
