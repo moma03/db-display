@@ -17,7 +17,14 @@
 #include <condition_variable>
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
+#include <ctime>
 #include <algorithm>
+#include <csignal>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 
 #include "led-matrix.h"
 #include "graphics.h"
@@ -35,6 +42,43 @@ using namespace std;
 // How often (seconds) to re-query the database for fresh data.
 static const int DB_REFRESH_SECONDS = 30;
 
+// The departure list rows are drawn inside a viewport indented past the
+// scrollbar; times inside it land LIST_CONTENT_X pixels further right.
+static const int SCROLLBAR_X    = 1;
+static const int SCROLLBAR_W    = 2;
+static const int LIST_CONTENT_X = SCROLLBAR_X + SCROLLBAR_W + 1;
+
+// Set by SIGINT/SIGTERM so the render loop can exit and clean up the panel.
+static volatile sig_atomic_t interrupt_received = 0;
+static void InterruptHandler(int) { interrupt_received = 1; }
+
+// -------------------------------------------------------------------------
+// Helpers: resolve paths relative to the executable so the program works
+// from any working directory (e.g. when started as a systemd service).
+// -------------------------------------------------------------------------
+static string executableDir(const char *argv0) {
+    char buf[4096];
+    buf[0] = '\0';
+#if defined(__linux__)
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) buf[n] = '\0'; else buf[0] = '\0';
+#elif defined(__APPLE__)
+    uint32_t size = sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) != 0) buf[0] = '\0';
+#endif
+    string path = buf[0] ? string(buf) : (argv0 ? string(argv0) : string());
+    size_t slash = path.rfind('/');
+    return (slash == string::npos) ? string(".") : path.substr(0, slash);
+}
+
+// Prefer the file next to the executable; fall back to the path as given
+// (relative to the current directory, the old behaviour).
+static string resolvePath(const string &exe_dir, const string &rel) {
+    string cand = exe_dir + "/" + rel;
+    if (access(cand.c_str(), F_OK) == 0) return cand;
+    return rel;
+}
+
 // -------------------------------------------------------------------------
 // Shared data types used by the renderer
 // -------------------------------------------------------------------------
@@ -44,6 +88,20 @@ struct Departure {
     string pTime; string cTime; string stops;
     vector<Note> notes; bool cancelled = false;
 };
+
+// Equality is used to detect whether a DB refresh actually changed anything;
+// unchanged refreshes must not rebuild the scrollers (that would reset all
+// scroll positions).
+static bool operator==(const Note &a, const Note &b) {
+    return a.id == b.id && a.text == b.text;
+}
+static bool operator==(const Departure &a, const Departure &b) {
+    return a.platform == b.platform && a.cPlatform == b.cPlatform &&
+           a.line == b.line && a.dest == b.dest &&
+           a.pTime == b.pTime && a.cTime == b.cTime &&
+           a.stops == b.stops && a.cancelled == b.cancelled &&
+           a.notes == b.notes;
+}
 
 // -------------------------------------------------------------------------
 // Helper: convert FetchedDeparture → Departure
@@ -167,7 +225,12 @@ void drawPlatform(Canvas *canvas, const Font &font, int x, int baseline,
     const string &plat = (!dep.cPlatform.empty() && dep.cPlatform != dep.platform)
                          ? dep.cPlatform : dep.platform;
     bool changed = (!dep.cPlatform.empty() && dep.cPlatform != dep.platform);
-    if (changed) {
+    // Changed platforms blink like on the real DB displays: the inverted
+    // white box alternates with the normal rendering every 500 ms.
+    bool inverted = changed &&
+        (chrono::duration_cast<chrono::milliseconds>(
+             chrono::steady_clock::now().time_since_epoch()).count() / 500) % 2 == 0;
+    if (inverted) {
         // The highlight box grows with the text so wide platform numbers
         // are never drawn outside of it.
         int box_w = max(plat_w, MeasureTextHalfSpace(font, plat));
@@ -179,6 +242,23 @@ void drawPlatform(Canvas *canvas, const Font &font, int x, int baseline,
     } else {
         DrawTextHalfSpace(canvas, font, x, baseline, Color(255, 255, 255), plat);
     }
+}
+
+// Width to reserve on the right for the time column: the widest planned +
+// delayed time over all departures. The first row uses the big font; list
+// rows use the small font but sit LIST_CONTENT_X further right on screen.
+static int computeTimeReserve(const Font &bigFont, const Font &smallFont,
+                              const vector<Departure> &list) {
+    int reserve = led_util::MeasureText(bigFont, list[0].pTime);
+    if (!list[0].cancelled && !list[0].cTime.empty())
+        reserve += 2 + led_util::MeasureText(bigFont, list[0].cTime);
+    for (int i = 1; i < (int)list.size(); ++i) {
+        int w = led_util::MeasureText(smallFont, list[i].pTime);
+        if (!list[i].cancelled && !list[i].cTime.empty())
+            w += 2 + led_util::MeasureText(smallFont, list[i].cTime);
+        reserve = max(reserve, w + LIST_CONTENT_X);
+    }
+    return reserve;
 }
 
 void drawStrikethrough(Canvas *canvas, int x, int baseline, int text_w,
@@ -327,14 +407,10 @@ static void buildScrollers(ScrollerState &ss,
     }
     ss.content_h = total_content_h;
 
-    const int scrollbar_w    = 2;
-    const int scrollbar_x    = 1;
-    const int list_content_x = scrollbar_x + scrollbar_w + 1;
-
-    ss.listVP    = new ViewPort(canvas, list_content_x, ss.list_y,
-                                width - list_content_x, ss.list_h);
+    ss.listVP    = new ViewPort(canvas, LIST_CONTENT_X, ss.list_y,
+                                width - LIST_CONTENT_X, ss.list_h);
     ss.pageScroll = new PageScroller(ss.listVP, ss.content_h, ss.row_h, 3.0f, 40.0f);
-    ss.scrollBar  = new led_util::ScrollBar(canvas, scrollbar_x, ss.list_y, ss.list_h, scrollbar_w);
+    ss.scrollBar  = new led_util::ScrollBar(canvas, SCROLLBAR_X, ss.list_y, ss.list_h, SCROLLBAR_W);
 
     // Ticker (only when there are station messages)
     if (!ticker.empty()) {
@@ -352,10 +428,14 @@ static void buildScrollers(ScrollerState &ss,
         int y_pos      = ss.row_y_offsets[idx];
         int row_dest_x = ss.row_dest_x[idx];
         int row_dest_w = max(1, width - time_reserve - row_dest_x);
+        // Cancelled rows draw their destination via this scroller too (blue
+        // on the inverted white row), so long names still clip and scroll
+        // instead of running into the time column.
         ss.destScrollers.push_back(new ScrollingTextBox(
             ss.listVP, row_dest_x, y_pos + 1,
             row_dest_w, ss.row_h,
-            smallFont, Color(255, 255, 255), list[i].dest,
+            smallFont, list[i].cancelled ? Color(0, 0, 120)
+                                         : Color(255, 255, 255), list[i].dest,
             20.0f, 1.5f, 12));
         if (!list[i].notes.empty()) {
             string note_str;
@@ -378,6 +458,12 @@ static void buildScrollers(ScrollerState &ss,
 // main
 // =========================================================================
 int main(int argc, char **argv) {
+    signal(SIGINT,  InterruptHandler);
+    signal(SIGTERM, InterruptHandler);
+
+    const string exeDir     = executableDir(argv[0]);
+    const string configPath = resolvePath(exeDir, "config.json");
+
     // --- Parse CLI flags ---
     bool debugMode = false;
     int evaOverride = 0;  // 0 means "not given on the command line"
@@ -397,7 +483,7 @@ int main(int argc, char **argv) {
     matrix_options.cols = 64;
     matrix_options.chain_length = 1;
     matrix_options.parallel = 1;
-    if (!LoadConfigWithCliOverrides(&argc, &argv, "config.json", matrix_options, runtime_options)) {
+    if (!LoadConfigWithCliOverrides(&argc, &argv, configPath, matrix_options, runtime_options)) {
         rgb_matrix::PrintMatrixFlags(stderr);
         return 1;
     }
@@ -412,8 +498,17 @@ int main(int argc, char **argv) {
     FrameCanvas *offB = matrix->CreateFrameCanvas();
     FrameCanvas *off  = offA;
 
-    Font bigFont;   bigFont.LoadFont("third_party/rpi-rgb-led-matrix-extensions/third_party/rpi-rgb-led-matrix/fonts/clR6x12.bdf");
-    Font smallFont; smallFont.LoadFont("third_party/rpi-rgb-led-matrix-extensions/third_party/rpi-rgb-led-matrix/fonts/5x8.bdf");
+    const string fontDir = "third_party/rpi-rgb-led-matrix-extensions/third_party/rpi-rgb-led-matrix/fonts";
+    const string bigFontPath   = resolvePath(exeDir, fontDir + "/clR6x12.bdf");
+    const string smallFontPath = resolvePath(exeDir, fontDir + "/5x8.bdf");
+    Font bigFont, smallFont;
+    if (!bigFont.LoadFont(bigFontPath.c_str()) ||
+        !smallFont.LoadFont(smallFontPath.c_str())) {
+        cerr << "Couldn't load fonts: " << bigFontPath
+             << " / " << smallFontPath << endl;
+        delete matrix;
+        return 1;
+    }
 
     int width  = off->width();
     int height = off->height();
@@ -421,7 +516,7 @@ int main(int argc, char **argv) {
     // --- DB connection config (only needed in live mode) ---
     DBConnectionConfig dbCfg;
     if (!debugMode) {
-        if (!LoadDBConnectionConfig("config.json", dbCfg)) {
+        if (!LoadDBConnectionConfig(configPath, dbCfg)) {
             cerr << "Warning: No 'database' section in config.json, using defaults" << endl;
         }
         if (evaOverride != 0) {
@@ -448,18 +543,19 @@ int main(int argc, char **argv) {
 
     // --- Column layout (first departure; list rows are laid out in
     //     buildScrollers from the mean widths of their entries) ---
-    int plat_w       = led_util::MeasureText(smallFont, "55");
+    // The first row is drawn in the big font, so its platform column is
+    // measured in the big font too.
+    int plat_w       = led_util::MeasureText(bigFont, "55");
     int line_w       = MeasureTextHalfSpace(bigFont, list[0].line);
     int plat_x       = 4;
     int line_x       = plat_x + plat_w + 1;
     int dest_x       = line_x + line_w + 4;
-    int time_reserve = 60;
+    int time_reserve = computeTimeReserve(bigFont, smallFont, list);
     int dest_w       = width - dest_x - time_reserve;
 
     // Layout constants
     const int header_bottom      = 14;
     const int first_dep_baseline = 30;
-    const int via_baseline       = first_dep_baseline + smallFont.height();
 
     // Build initial scroller state
     ScrollerState ss;
@@ -531,21 +627,37 @@ int main(int argc, char **argv) {
     });
 
     // --- Main render loop ---
-    while (true) {
+    while (!interrupt_received) {
         // --- Check for new data from background thread ---
         if (!debugMode) {
-            lock_guard<mutex> lock(shared.mtx);
-            if (shared.hasNewData) {
-                list    = std::move(shared.departures);
-                station = std::move(shared.station);
-                ticker  = std::move(shared.ticker);
-                shared.hasNewData = false;
+            vector<Departure> newList;
+            string newStation, newTicker;
+            bool gotNew = false;
+            {
+                lock_guard<mutex> lock(shared.mtx);
+                if (shared.hasNewData) {
+                    newList    = std::move(shared.departures);
+                    newStation = std::move(shared.station);
+                    newTicker  = std::move(shared.ticker);
+                    shared.hasNewData = false;
+                    gotNew = true;
+                }
+            }
+
+            // Rebuild the scrollers (which resets all scroll positions)
+            // only when the refresh actually changed something.
+            if (gotNew && (newList != list || newStation != station ||
+                           newTicker != ticker)) {
+                list    = std::move(newList);
+                station = std::move(newStation);
+                ticker  = std::move(newTicker);
 
                 // Recalculate layout widths in case line names changed
-                line_w = MeasureTextHalfSpace(bigFont, list[0].line);
-                line_x = plat_x + plat_w + 1;
-                dest_x = line_x + line_w + 4;
-                dest_w = width - dest_x - time_reserve;
+                line_w       = MeasureTextHalfSpace(bigFont, list[0].line);
+                line_x       = plat_x + plat_w + 1;
+                dest_x       = line_x + line_w + 4;
+                time_reserve = computeTimeReserve(bigFont, smallFont, list);
+                dest_w       = width - dest_x - time_reserve;
 
                 buildScrollers(ss, off, bigFont, smallFont, list, ticker,
                                width, height, plat_x, dest_x, dest_w, time_reserve);
@@ -560,6 +672,24 @@ int main(int argc, char **argv) {
         // Station name header
         DrawText(c, bigFont, plat_x, bigFont.baseline() + 1,
                  Color(255, 255, 255), nullptr, station.c_str());
+
+        // Clock in the top-right corner. The patch behind it is cleared
+        // first so a long station name can never bleed into the time.
+        {
+            time_t now_t = time(nullptr);
+            struct tm tmv;
+            localtime_r(&now_t, &tmv);
+            char clk[16];
+            snprintf(clk, sizeof(clk), "%02d:%02d:%02d",
+                     tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+            int clk_w = led_util::MeasureText(bigFont, clk);
+            int clk_x = width - clk_w - 1;
+            for (int py = 0; py < header_bottom; ++py)
+                for (int px = clk_x - 2; px < width; ++px)
+                    c->SetPixel(px, py, 0, 0, 120);
+            DrawText(c, bigFont, clk_x, bigFont.baseline() + 1,
+                     Color(255, 255, 255), nullptr, clk);
+        }
 
         // Separator line
         for (int x = 0; x < width; ++x)
@@ -608,7 +738,6 @@ int main(int argc, char **argv) {
             int y_pos      = ss.row_y_offsets[idx];
             int baseline   = y_pos + smallFont.baseline() + 1;
             int row_line_x = ss.row_line_x[idx];
-            int row_dest_x = ss.row_dest_x[idx];
 
             if (list[i].cancelled) {
                 int row_top = y_pos;
@@ -617,8 +746,8 @@ int main(int argc, char **argv) {
                                   Color(0, 0, 120), list[i].platform);
                 DrawTextHalfSpace(ss.listVP, smallFont, row_line_x, baseline,
                                   Color(0, 0, 120), list[i].line);
-                DrawText(ss.listVP, smallFont, row_dest_x, baseline,
-                         Color(0, 0, 120), nullptr, list[i].dest.c_str());
+                ss.destScrollers[idx]->SetCanvas(ss.listVP);
+                ss.destScrollers[idx]->Update();
                 int tw = DrawText(ss.listVP, smallFont, width - time_reserve, baseline,
                                   Color(0, 0, 120), nullptr, list[i].pTime.c_str());
                 drawStrikethrough(ss.listVP, width - time_reserve, baseline, tw, smallFont);
@@ -662,6 +791,8 @@ int main(int argc, char **argv) {
         }
     }
 
+    cout << "Received signal, shutting down..." << endl;
+
     // Stop VSync swap thread
     swapRunning.store(false);
     swapCv.notify_one();
@@ -674,6 +805,7 @@ int main(int argc, char **argv) {
         fetchThread.join();
 
     ss.destroy();
+    matrix->Clear();
     delete matrix;
     return 0;
 }
