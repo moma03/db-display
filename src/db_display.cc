@@ -17,6 +17,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <cstdlib>
+#include <algorithm>
 
 #include "led-matrix.h"
 #include "graphics.h"
@@ -132,19 +133,51 @@ Color lineColor(const string &line) {
     return Color(255, 60, 60);       // red for RE and everything else
 }
 
+// Draw text with every space rendered at half its normal width, so train
+// line names ("RE 11") and platform numbers stay compact. Returns the
+// total width drawn, like DrawText.
+int DrawTextHalfSpace(Canvas *canvas, const Font &font, int x, int y,
+                      const Color &color, const string &text) {
+    const int half_sp = (font.CharacterWidth(' ') + 1) / 2;
+    int cursor = x;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t sp = text.find(' ', pos);
+        if (sp == string::npos) {
+            cursor += DrawText(canvas, font, cursor, y, color, nullptr,
+                               text.substr(pos).c_str());
+            break;
+        }
+        if (sp > pos)
+            cursor += DrawText(canvas, font, cursor, y, color, nullptr,
+                               text.substr(pos, sp - pos).c_str());
+        cursor += half_sp;
+        pos = sp + 1;
+    }
+    return cursor - x;
+}
+
+int MeasureTextHalfSpace(const Font &font, const string &text) {
+    static led_util::NullCanvas nc;
+    return DrawTextHalfSpace(&nc, font, 0, 0, Color(0, 0, 0), text);
+}
+
 void drawPlatform(Canvas *canvas, const Font &font, int x, int baseline,
                   const Departure &dep, int plat_w) {
     const string &plat = (!dep.cPlatform.empty() && dep.cPlatform != dep.platform)
                          ? dep.cPlatform : dep.platform;
     bool changed = (!dep.cPlatform.empty() && dep.cPlatform != dep.platform);
     if (changed) {
+        // The highlight box grows with the text so wide platform numbers
+        // are never drawn outside of it.
+        int box_w = max(plat_w, MeasureTextHalfSpace(font, plat));
         int top = baseline - font.baseline();
         for (int py = top; py < top + font.height(); ++py)
-            for (int px = x - 1; px < x + plat_w + 1; ++px)
+            for (int px = x - 1; px < x + box_w + 1; ++px)
                 canvas->SetPixel(px, py, 255, 255, 255);
-        DrawText(canvas, font, x, baseline, Color(0, 0, 120), nullptr, plat.c_str());
+        DrawTextHalfSpace(canvas, font, x, baseline, Color(0, 0, 120), plat);
     } else {
-        DrawText(canvas, font, x, baseline, Color(255, 255, 255), nullptr, plat.c_str());
+        DrawTextHalfSpace(canvas, font, x, baseline, Color(255, 255, 255), plat);
     }
 }
 
@@ -176,6 +209,11 @@ struct ScrollerState {
     led_util::ScrollBar *scrollBar       = nullptr;
 
     vector<int> row_y_offsets;
+    // Per list row: x positions, shifted right individually when the row's
+    // platform/line number is wider than the mean-based column.
+    vector<int> row_line_x;
+    vector<int> row_dest_x;
+    int plat_col_w   = 0;   // mean platform width over the list rows
     int content_h    = 0;
     int row_h        = 0;
     int list_y       = 0;
@@ -196,6 +234,8 @@ struct ScrollerState {
         delete listVP;     listVP     = nullptr;
         delete scrollBar;  scrollBar  = nullptr;
         row_y_offsets.clear();
+        row_line_x.clear();
+        row_dest_x.clear();
     }
 
     ~ScrollerState() { destroy(); }
@@ -208,8 +248,38 @@ static void buildScrollers(ScrollerState &ss,
                            const vector<Departure> &list,
                            const string &ticker,
                            int width, int height,
-                           int dest_x, int dest_w, int time_reserve) {
+                           int plat_x, int dest_x, int dest_w, int time_reserve) {
     ss.destroy();
+
+    // --- Column layout for the list rows ---
+    // Columns start at the mean platform/line width over all list entries;
+    // rows whose numbers are wider than the mean get shifted individually
+    // (platform pushes the line, line pushes the destination) so nothing
+    // overlaps. The first departure keeps its own layout (dest_x).
+    int nrows = (int)list.size() - 1;
+    int plat_sum = 0, line_sum = 0;
+    for (int i = 1; i < (int)list.size(); ++i) {
+        const Departure &d = list[i];
+        const string &plat = (!d.cPlatform.empty() && d.cPlatform != d.platform)
+                             ? d.cPlatform : d.platform;
+        plat_sum += MeasureTextHalfSpace(smallFont, plat);
+        line_sum += MeasureTextHalfSpace(smallFont, d.line);
+    }
+    ss.plat_col_w   = nrows > 0 ? (plat_sum + nrows / 2) / nrows : 0;
+    int line_col_w  = nrows > 0 ? (line_sum + nrows / 2) / nrows : 0;
+    int list_line_x = plat_x + ss.plat_col_w + 1;
+    int list_dest_x = list_line_x + line_col_w + 4;
+    for (int i = 1; i < (int)list.size(); ++i) {
+        const Departure &d = list[i];
+        const string &plat = (!d.cPlatform.empty() && d.cPlatform != d.platform)
+                             ? d.cPlatform : d.platform;
+        int lx = max(list_line_x,
+                     plat_x + MeasureTextHalfSpace(smallFont, plat) + 1);
+        int dx = max(list_dest_x,
+                     lx + MeasureTextHalfSpace(smallFont, d.line) + 2);
+        ss.row_line_x.push_back(lx);
+        ss.row_dest_x.push_back(dx);
+    }
 
     // --- Layout constants ---
     const int first_dep_baseline = 30;
@@ -278,11 +348,13 @@ static void buildScrollers(ScrollerState &ss,
 
     // Per-departure scrollers for list entries
     for (int i = 1; i < (int)list.size(); ++i) {
-        int idx   = i - 1;
-        int y_pos = ss.row_y_offsets[idx];
+        int idx        = i - 1;
+        int y_pos      = ss.row_y_offsets[idx];
+        int row_dest_x = ss.row_dest_x[idx];
+        int row_dest_w = max(1, width - time_reserve - row_dest_x);
         ss.destScrollers.push_back(new ScrollingTextBox(
-            ss.listVP, dest_x, y_pos + 1,
-            dest_w, ss.row_h,
+            ss.listVP, row_dest_x, y_pos + 1,
+            row_dest_w, ss.row_h,
             smallFont, Color(255, 255, 255), list[i].dest,
             20.0f, 1.5f, 12));
         if (!list[i].notes.empty()) {
@@ -292,8 +364,8 @@ static void buildScrollers(ScrollerState &ss,
                 note_str += list[i].notes[n].text;
             }
             ss.noteScrollers.push_back(new ScrollingTextBox(
-                ss.listVP, dest_x, y_pos + ss.row_h + 1,
-                dest_w, ss.row_h,
+                ss.listVP, row_dest_x, y_pos + ss.row_h + 1,
+                row_dest_w, ss.row_h,
                 smallFont, Color(255, 180, 0), note_str,
                 20.0f, 2.0f, 12));
         } else {
@@ -374,9 +446,10 @@ int main(int argc, char **argv) {
         }
     }
 
-    // --- Column layout ---
+    // --- Column layout (first departure; list rows are laid out in
+    //     buildScrollers from the mean widths of their entries) ---
     int plat_w       = led_util::MeasureText(smallFont, "55");
-    int line_w       = led_util::MeasureText(bigFont, list[0].line);
+    int line_w       = MeasureTextHalfSpace(bigFont, list[0].line);
     int plat_x       = 4;
     int line_x       = plat_x + plat_w + 1;
     int dest_x       = line_x + line_w + 4;
@@ -391,7 +464,7 @@ int main(int argc, char **argv) {
     // Build initial scroller state
     ScrollerState ss;
     buildScrollers(ss, off, bigFont, smallFont, list, ticker,
-                   width, height, dest_x, dest_w, time_reserve);
+                   width, height, plat_x, dest_x, dest_w, time_reserve);
 
     // --- Background fetch thread (live mode only) ---
     struct SharedFetchData {
@@ -469,13 +542,13 @@ int main(int argc, char **argv) {
                 shared.hasNewData = false;
 
                 // Recalculate layout widths in case line names changed
-                line_w = led_util::MeasureText(bigFont, list[0].line);
+                line_w = MeasureTextHalfSpace(bigFont, list[0].line);
                 line_x = plat_x + plat_w + 1;
                 dest_x = line_x + line_w + 4;
                 dest_w = width - dest_x - time_reserve;
 
                 buildScrollers(ss, off, bigFont, smallFont, list, ticker,
-                               width, height, dest_x, dest_w, time_reserve);
+                               width, height, plat_x, dest_x, dest_w, time_reserve);
             }
         }
 
@@ -501,8 +574,8 @@ int main(int argc, char **argv) {
         {
             Color textCol = d.cancelled ? Color(0, 0, 120) : Color(255, 255, 255);
             drawPlatform(c, bigFont, plat_x, first_dep_baseline, d, plat_w);
-            DrawText(c, bigFont, line_x, first_dep_baseline,
-                     d.cancelled ? textCol : lineColor(d.line), nullptr, d.line.c_str());
+            DrawTextHalfSpace(c, bigFont, line_x, first_dep_baseline,
+                              d.cancelled ? textCol : lineColor(d.line), d.line);
             ss.firstDestScroller->SetCanvas(c);
             ss.firstDestScroller->Update();
             int pt0_w = DrawText(c, bigFont, width - time_reserve, first_dep_baseline,
@@ -531,26 +604,28 @@ int main(int argc, char **argv) {
                            255, 255, 255);
 
         for (int i = 1; i < (int)list.size(); ++i) {
-            int idx      = i - 1;
-            int y_pos    = ss.row_y_offsets[idx];
-            int baseline = y_pos + smallFont.baseline() + 1;
+            int idx        = i - 1;
+            int y_pos      = ss.row_y_offsets[idx];
+            int baseline   = y_pos + smallFont.baseline() + 1;
+            int row_line_x = ss.row_line_x[idx];
+            int row_dest_x = ss.row_dest_x[idx];
 
             if (list[i].cancelled) {
                 int row_top = y_pos;
                 drawInvertedRowBg(ss.listVP, 0, row_top, width, ss.row_h);
-                DrawText(ss.listVP, smallFont, plat_x, baseline,
-                         Color(0, 0, 120), nullptr, list[i].platform.c_str());
-                DrawText(ss.listVP, smallFont, line_x, baseline,
-                         Color(0, 0, 120), nullptr, list[i].line.c_str());
-                DrawText(ss.listVP, smallFont, dest_x, baseline,
+                DrawTextHalfSpace(ss.listVP, smallFont, plat_x, baseline,
+                                  Color(0, 0, 120), list[i].platform);
+                DrawTextHalfSpace(ss.listVP, smallFont, row_line_x, baseline,
+                                  Color(0, 0, 120), list[i].line);
+                DrawText(ss.listVP, smallFont, row_dest_x, baseline,
                          Color(0, 0, 120), nullptr, list[i].dest.c_str());
                 int tw = DrawText(ss.listVP, smallFont, width - time_reserve, baseline,
                                   Color(0, 0, 120), nullptr, list[i].pTime.c_str());
                 drawStrikethrough(ss.listVP, width - time_reserve, baseline, tw, smallFont);
             } else {
-                drawPlatform(ss.listVP, smallFont, plat_x, baseline, list[i], plat_w);
-                DrawText(ss.listVP, smallFont, line_x, baseline,
-                         lineColor(list[i].line), nullptr, list[i].line.c_str());
+                drawPlatform(ss.listVP, smallFont, plat_x, baseline, list[i], ss.plat_col_w);
+                DrawTextHalfSpace(ss.listVP, smallFont, row_line_x, baseline,
+                                  lineColor(list[i].line), list[i].line);
                 ss.destScrollers[idx]->SetCanvas(ss.listVP);
                 ss.destScrollers[idx]->Update();
                 int pt_w = DrawText(ss.listVP, smallFont, width - time_reserve, baseline,
