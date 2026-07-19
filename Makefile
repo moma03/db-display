@@ -10,6 +10,7 @@ OBJS = src/db_display.o src/db_fetcher.o src/db_config.o
 
 all: $(COMMON_LIB) $(TARGET)
 
+.PHONY: $(COMMON_LIB)
 $(COMMON_LIB):
 	$(MAKE) -C $(EXT_DIR)
 
