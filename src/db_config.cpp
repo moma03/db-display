@@ -1,7 +1,7 @@
 #include "db_config.h"
 #include <fstream>
 #include <iostream>
-#include <common/third_party/json/json.hpp>
+#include <json.hpp>
 
 using json = nlohmann::json;
 
