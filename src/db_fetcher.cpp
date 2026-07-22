@@ -219,10 +219,14 @@ int FetchDepartures(const DBConnectionConfig &cfg,
         if (!cp.empty() && cp != dep.platform)
             dep.cPlatform = cp;
 
+        // Vehicle category ("RE", "S", "ICE", "Bus", ...) -- the display uses
+        // it to tell buses apart from trains.
+        dep.category = getField(res, r, cCat);
+
         // Line: prefer planned_line, fall back to "category train_number"
         dep.line = getField(res, r, cPLine);
         if (dep.line.empty()) {
-            std::string cat = getField(res, r, cCat);
+            const std::string &cat = dep.category;
             std::string num = getField(res, r, cTNum);
             if (!cat.empty() && !num.empty())
                 dep.line = cat + " " + num;

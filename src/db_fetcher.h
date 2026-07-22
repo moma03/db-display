@@ -21,6 +21,7 @@ struct FetchedDeparture {
     std::string platform;        // planned platform
     std::string cPlatform;       // changed platform (empty if unchanged)
     std::string line;            // e.g. "RE 11", "S 1", "ICE 123"
+    std::string category;        // vehicle category, e.g. "RE", "S", "ICE", "Bus"
     std::string dest;            // final destination station name
     std::string pTime;           // planned time "HH:MM"
     std::string cTime;           // changed/actual time "HH:MM" (empty if on time)
