@@ -14,7 +14,6 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
-#include <condition_variable>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -41,6 +40,10 @@ using namespace std;
 
 // How often (seconds) to re-query the database for fresh data.
 static const int DB_REFRESH_SECONDS = 30;
+
+// Render pace, ~30 fps. Matches the other programs on this panel. Rendering
+// faster gains nothing visually and starves the matrix refresh thread.
+static const int FRAME_MS = 33;
 
 // The departure list rows are drawn inside a viewport indented past the
 // scrollbar; times inside it land LIST_CONTENT_X pixels further right.
@@ -491,12 +494,14 @@ int main(int argc, char **argv) {
     RGBMatrix *matrix = RGBMatrix::CreateFromOptions(matrix_options, runtime_options);
     if (!matrix) return 1;
 
-    // Triple-buffering: two offscreen canvases + the internal display buffer.
-    // This lets the render thread work on the next frame while the vsync
-    // thread waits for the GPIO refresh cycle to finish.
-    FrameCanvas *offA = matrix->CreateFrameCanvas();
-    FrameCanvas *offB = matrix->CreateFrameCanvas();
-    FrameCanvas *off  = offA;
+    // Single offscreen canvas, swapped on vsync from the render loop itself.
+    // The panel's refresh thread is very timing sensitive: it must not have
+    // to compete with a render thread that is permanently runnable, or
+    // individual scan rows get uneven on-time and show up as ghosting.
+    // Blocking in SwapOnVSync plus the FRAME_MS delay keeps this thread
+    // asleep for most of every frame — same pattern as the other programs
+    // driving this panel.
+    FrameCanvas *off = matrix->CreateFrameCanvas();
 
     const string fontDir = "third_party/rpi-rgb-led-matrix-extensions/third_party/rpi-rgb-led-matrix/fonts";
     const string bigFontPath   = resolvePath(exeDir, fontDir + "/clR6x12.bdf");
@@ -594,37 +599,6 @@ int main(int argc, char **argv) {
             }
         });
     }
-
-    // --- VSync swap thread ---
-    // Decouples frame rendering from the blocking SwapOnVSync call so that
-    // the render thread can start building the next frame immediately.
-    mutex swapMtx;
-    condition_variable swapCv;
-    FrameCanvas *swapReady = nullptr;   // rendered frame waiting for display
-    FrameCanvas *swapFree  = offB;      // canvas available for rendering
-    atomic<bool> swapRunning{true};
-
-    thread swapThread([&]() {
-        while (swapRunning.load()) {
-            FrameCanvas *toSwap = nullptr;
-            {
-                unique_lock<mutex> lock(swapMtx);
-                swapCv.wait(lock, [&]{
-                    return swapReady != nullptr || !swapRunning.load();
-                });
-                if (!swapRunning.load()) break;
-                toSwap = swapReady;
-                swapReady = nullptr;
-            }
-            // Blocks until the next vsync — this is the GPU/GPIO-bound wait
-            FrameCanvas *returned = matrix->SwapOnVSync(toSwap);
-            {
-                lock_guard<mutex> lock(swapMtx);
-                swapFree = returned;
-                swapCv.notify_one();
-            }
-        }
-    });
 
     // --- Main render loop ---
     while (!interrupt_received) {
@@ -778,26 +752,14 @@ int main(int argc, char **argv) {
             ss.tickerScroller->Update();
         }
 
-        // Hand off rendered frame to VSync thread and get next free canvas
-        {
-            unique_lock<mutex> lock(swapMtx);
-            swapReady = off;
-            swapCv.notify_one();
-            swapCv.wait(lock, [&]{
-                return swapFree != nullptr || !swapRunning.load();
-            });
-            off = swapFree;
-            swapFree = nullptr;
-        }
+        // Show the frame, then idle until the next one. Nothing on screen
+        // moves faster than ~20 px/s, so FRAME_MS is imperceptible here and
+        // leaves the CPU free for the panel's refresh thread.
+        off = matrix->SwapOnVSync(off);
+        this_thread::sleep_for(chrono::milliseconds(FRAME_MS));
     }
 
     cout << "Received signal, shutting down..." << endl;
-
-    // Stop VSync swap thread
-    swapRunning.store(false);
-    swapCv.notify_one();
-    if (swapThread.joinable())
-        swapThread.join();
 
     // Stop background fetch thread
     fetchRunning.store(false);
