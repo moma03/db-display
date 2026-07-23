@@ -257,105 +257,44 @@ static const string &platformLabel(const Departure &dep) {
     return plat;
 }
 
-// Bus rows are drawn yellow on purple to set them apart from rail services.
-static const Color BUS_FG(255, 255, 0);
-static const uint8_t BUS_BG_R = 90, BUS_BG_G = 0, BUS_BG_B = 130;
-
-// A bus row is styled as one whenever the departure is a bus; the BUS label
-// itself only replaces the platform when there is no platform to show.
-static bool busStyled(const Departure &dep) {
-    return isBus(dep) && !dep.cancelled;
-}
-
-void drawPlatform(Canvas *canvas, const Font &font, int x, int baseline,
-                  const Departure &dep, int plat_w, const Color &textCol) {
-    const string &plat = platformLabel(dep);
-    bool changed = (!dep.cPlatform.empty() && dep.cPlatform != dep.platform);
-    // Changed platforms blink like on the real DB displays: the inverted
-    // white box alternates with the normal rendering every 500 ms.
-    bool inverted = changed &&
-        (chrono::duration_cast<chrono::milliseconds>(
-             chrono::steady_clock::now().time_since_epoch()).count() / 500) % 2 == 0;
-    if (inverted) {
-        // The highlight box grows with the text so wide platform numbers
-        // are never drawn outside of it.
-        int box_w = max(plat_w, MeasureTextHalfSpace(font, plat));
-        int top = baseline - font.baseline();
-        for (int py = top; py < top + font.height(); ++py)
-            for (int px = x - 1; px < x + box_w + 1; ++px)
-                canvas->SetPixel(px, py, 255, 255, 255);
-        DrawTextHalfSpace(canvas, font, x, baseline, Color(0, 0, 120), plat);
-    } else {
-        DrawTextHalfSpace(canvas, font, x, baseline, textCol, plat);
-    }
-}
-
-// Width to reserve on the right for the time column: the widest planned +
-// delayed time over all departures, each measured in the font its row uses.
-static int computeTimeReserve(const Font &bigFont, const Font &smallFont,
-                              const vector<Departure> &list) {
-    int reserve = 0;
-    for (size_t i = 0; i < list.size(); ++i) {
-        const Font &f = (i == 0) ? bigFont : smallFont;
-        int w = led_util::MeasureText(f, list[i].pTime);
-        if (!list[i].cancelled && !list[i].cTime.empty())
-            w += 2 + led_util::MeasureText(f, list[i].cTime);
-        reserve = max(reserve, w);
-    }
-    return reserve;
-}
-
 // -------------------------------------------------------------------------
-// Column layout
+// Row styling
 // -------------------------------------------------------------------------
-// All four columns are in *screen* coordinates and shared by every row, so
-// the big first departure and the small list rows line up vertically.
-//
-// The list rows are drawn inside a ViewPort that already starts at
-// LIST_CONTENT_X, so drawing them means subtracting LIST_CONTENT_X from
-// these values -- that offset is what used to make the first departure's
-// platform sit 4 px left of every platform beneath it.
-//
-// Widths come from the widest entry in each column (measured in the font
-// that row is drawn in, big for the first departure and small for the rest)
-// so every row gets the same indent and nothing has to be nudged
-// individually.
-struct Columns {
-    int plat_x = 0;
-    int line_x = 0;
-    int dest_x = 0;
-    int time_x = 0;   // left edge of the time column
-    int dest_w = 0;   // room for destination text between dest_x and time_x
-    int plat_w = 0;   // column width, for the changed-platform highlight box
+// The hero block and the list rows are each drawn by one function that takes
+// its colours from a RowStyle, rather than testing for cancelled/bus at every
+// drawing site. A new kind of row means a new case in styleFor(), not another
+// branch through the renderer -- and what is tinted vs. inverted stays
+// consistent because every element reads the same struct.
+static const Color kBg(0, 0, 120);   // display background (dark blue)
+
+struct RowStyle {
+    Color   fg    {255, 255, 255};   // platform, line, destination, time
+    Color   via   {180, 180, 180};   // "via ..." line of the hero block
+    Color   note  {255, 180, 0};     // delay-reason line
+    Color   delay {255, 60, 60};     // changed (delayed) time
+    bool    fillBg        = false;   // paint the whole block first
+    uint8_t bg_r = 0, bg_g = 0, bg_b = 0;
+    bool    lineTypeColor = true;    // colour the line name by train type
+    bool    strikeTime    = false;   // strike the planned time through
 };
 
-static Columns computeColumns(const Font &bigFont, const Font &smallFont,
-                              const vector<Departure> &list, int width) {
-    Columns c;
-    c.plat_x = 5;
-
-    // Two digits in the big font is the floor, so single-digit platforms
-    // don't make the whole board jump inward when the data changes.
-    c.plat_w   = led_util::MeasureText(bigFont, "55");
-    int line_w = 0;
-    for (size_t i = 0; i < list.size(); ++i) {
-        const Font &f = (i == 0) ? bigFont : smallFont;
-        c.plat_w = max(c.plat_w, MeasureTextHalfSpace(f, platformLabel(list[i])));
-        line_w   = max(line_w,   MeasureTextHalfSpace(f, list[i].line));
+static RowStyle styleFor(const Departure &dep) {
+    RowStyle s;
+    if (dep.cancelled) {
+        // Inverted: background-coloured text on a white block.
+        s.fg = s.via = s.note = s.delay = kBg;
+        s.fillBg = true; s.bg_r = s.bg_g = s.bg_b = 255;
+        s.lineTypeColor = false;
+        s.strikeTime    = true;
+    } else if (isBus(dep)) {
+        // Replacement buses: yellow on purple, subtext in a darker yellow.
+        s.fg    = Color(255, 255, 0);
+        s.via   = s.note = Color(190, 150, 0);
+        s.delay = Color(255, 120, 90);   // plain red would sink into the purple
+        s.fillBg = true; s.bg_r = 90; s.bg_g = 0; s.bg_b = 130;
+        s.lineTypeColor = false;
     }
-
-    c.line_x = c.plat_x + c.plat_w + 3;
-    c.dest_x = c.line_x + line_w + 4;
-    c.time_x = width - computeTimeReserve(bigFont, smallFont, list);
-    c.dest_w = max(1, c.time_x - c.dest_x - 2);
-    return c;
-}
-
-void drawStrikethrough(Canvas *canvas, int x, int baseline, int text_w,
-                       const Font &font) {
-    int mid_y = baseline - font.baseline() / 2;
-    for (int px = x; px < x + text_w; ++px)
-        canvas->SetPixel(px, mid_y, 255, 0, 0);
+    return s;
 }
 
 void drawRowBg(Canvas *canvas, int x, int y, int w, int h,
@@ -365,37 +304,222 @@ void drawRowBg(Canvas *canvas, int x, int y, int w, int h,
             canvas->SetPixel(px, py, r, g, b);
 }
 
-void drawInvertedRowBg(Canvas *canvas, int x, int y, int w, int h) {
-    drawRowBg(canvas, x, y, w, h, 255, 255, 255);
+void drawPlatform(Canvas *canvas, const Font &font, int x, int baseline,
+                  const Departure &dep, int plat_w, const RowStyle &st) {
+    const string &plat = platformLabel(dep);
+    bool changed = (!dep.cPlatform.empty() && dep.cPlatform != dep.platform);
+    // Changed platforms blink like on the real DB displays: every 500 ms the
+    // platform swaps to a filled box, in whatever colours this row uses.
+    bool inverted = changed &&
+        (chrono::duration_cast<chrono::milliseconds>(
+             chrono::steady_clock::now().time_since_epoch()).count() / 500) % 2 == 0;
+    if (inverted) {
+        // The box grows with the text so wide platform numbers stay inside it.
+        int box_w = max(plat_w, MeasureTextHalfSpace(font, plat));
+        int top   = baseline - font.baseline();
+        drawRowBg(canvas, x - 1, top, box_w + 2, font.height(),
+                  st.fg.r, st.fg.g, st.fg.b);
+        Color txt = st.fillBg ? Color(st.bg_r, st.bg_g, st.bg_b) : kBg;
+        DrawTextHalfSpace(canvas, font, x, baseline, txt, plat);
+    } else {
+        DrawTextHalfSpace(canvas, font, x, baseline, st.fg, plat);
+    }
 }
+
+// -------------------------------------------------------------------------
+// Column layout
+// -------------------------------------------------------------------------
+// The hero block and the list are measured independently: they use different
+// fonts and different departures, so sharing one set of widths only made the
+// small rows inherit the big font's spacing.
+//
+// Hero columns are in screen coordinates. List columns are relative to the
+// list ViewPort (which itself starts at LIST_CONTENT_X), so list drawing uses
+// them as-is.
+struct Columns {
+    int plat_x = 0;
+    int line_x = 0;
+    int dest_x = 0;
+    int time_x = 0;   // left edge of the time column
+    int dest_w = 0;   // room for destination text between dest_x and time_x
+    int note_w = 0;   // reason line: indented past the platform only
+    int plat_w = 0;   // column width, for the changed-platform highlight box
+};
+
+// `deps` are the departures drawn in `font`; `x0` is the left margin and
+// `width` the space available in whatever coordinate system they live in.
+static Columns computeColumns(const Font &font,
+                              const vector<const Departure*> &deps,
+                              int x0, int width) {
+    Columns c;
+    c.plat_x = x0;
+
+    // Two digits is the floor, so single-digit platforms don't make the board
+    // jump inward when the data changes.
+    c.plat_w   = led_util::MeasureText(font, "55");
+    int line_w = 0, reserve = 0;
+    for (const Departure *d : deps) {
+        c.plat_w = max(c.plat_w, MeasureTextHalfSpace(font, platformLabel(*d)));
+        line_w   = max(line_w,   MeasureTextHalfSpace(font, d->line));
+        int w = led_util::MeasureText(font, d->pTime);
+        if (!d->cancelled && !d->cTime.empty())
+            w += 2 + led_util::MeasureText(font, d->cTime);
+        reserve = max(reserve, w);
+    }
+
+    c.line_x = c.plat_x + c.plat_w + 3;
+    c.dest_x = c.line_x + line_w + 4;
+    c.time_x = width - reserve;
+    c.dest_w = max(1, c.time_x - c.dest_x - 2);
+    c.note_w = max(1, c.time_x - c.line_x - 2);
+    return c;
+}
+
+static Columns heroColumns(const Font &bigFont, const vector<Departure> &list,
+                           int width) {
+    return computeColumns(bigFont, {&list[0]}, 5, width);
+}
+
+static Columns listColumns(const Font &smallFont, const vector<Departure> &list,
+                           int width) {
+    vector<const Departure*> deps;
+    for (size_t i = 1; i < list.size(); ++i) deps.push_back(&list[i]);
+    // x0 = 1 leaves room for the changed-platform box, which starts at x-1.
+    return computeColumns(smallFont, deps, 1, width - LIST_CONTENT_X);
+}
+
+void drawStrikethrough(Canvas *canvas, int x, int baseline, int text_w,
+                       const Font &font) {
+    int mid_y = baseline - font.baseline() / 2;
+    for (int px = x; px < x + text_w; ++px)
+        canvas->SetPixel(px, mid_y, 255, 0, 0);
+}
+
+// -------------------------------------------------------------------------
+// DepartureScroller — page scrolling that always lands on a departure
+// -------------------------------------------------------------------------
+// PageScroller advances by a fixed number of fixed-height items. Rows here
+// are not fixed height (a departure carrying a delay reason is taller), so
+// that arithmetic drifts and can leave a stray reason line alone at the top
+// of the viewport. This scroller only ever comes to rest on the start offset
+// of a departure.
+class DepartureScroller {
+public:
+    DepartureScroller(ViewPort *vp, vector<int> starts, vector<int> heights,
+                      int content_h, float wait = 3.0f, float speed = 40.0f)
+        : vp_(vp), starts_(std::move(starts)), heights_(std::move(heights)),
+          content_h_(content_h), wait_(wait), speed_(speed),
+          last_(chrono::steady_clock::now()) {}
+
+    void Update() {
+        const int visible = vp_->visibleHeight();
+        if (content_h_ <= visible) {          // everything fits: never scroll
+            cur_ = target_ = 0.0f;
+            Apply();
+            return;
+        }
+
+        const auto now = chrono::steady_clock::now();
+        const float dt = chrono::duration<float>(now - last_).count();
+
+        if (scrolling_) {
+            cur_ += speed_ * dt;
+            last_ = now;
+            if (cur_ >= target_) { cur_ = target_; scrolling_ = false; }
+        } else if (dt >= wait_) {
+            const int next = NextStart(visible);
+            last_ = now;
+            if (next < 0) {                   // nothing left below: back to top
+                cur_ = target_ = 0.0f;
+            } else {
+                target_    = static_cast<float>(next);
+                scrolling_ = true;
+            }
+        }
+        Apply();
+    }
+
+    float scrollFraction() const {
+        const int max_off = max(0, content_h_ - vp_->visibleHeight());
+        return max_off <= 0 ? 0.0f : min(1.0f, cur_ / static_cast<float>(max_off));
+    }
+    float viewFraction() const {
+        return content_h_ <= 0 ? 1.0f
+             : min(1.0f, vp_->visibleHeight() / static_cast<float>(content_h_));
+    }
+
+private:
+    // Start of the first departure that isn't fully visible from where the
+    // list is (or is heading). Returns -1 when the rest already fits.
+    int NextStart(int visible) const {
+        const int top    = static_cast<int>(target_ + 0.5f);
+        const int bottom = top + visible;
+        int next = -1;
+        for (size_t i = 0; i < starts_.size(); ++i) {
+            if (starts_[i] + heights_[i] > bottom && starts_[i] > top) {
+                next = starts_[i];
+                break;
+            }
+        }
+        if (next < 0) return -1;
+
+        // Last page: scrolling all the way to `next` would run off the end of
+        // the content and leave a gap under the final departure. Back up to
+        // the earliest departure that still shows the tail in full -- it
+        // repeats a row or two, which reads better than empty space.
+        if (next + visible > content_h_) {
+            for (size_t i = 0; i < starts_.size(); ++i)
+                if (starts_[i] + visible >= content_h_ && starts_[i] > top)
+                    return starts_[i];
+        }
+        return next;
+    }
+    void Apply() { vp_->SetScrollY(static_cast<int>(cur_)); }
+
+    ViewPort *vp_;
+    vector<int> starts_, heights_;
+    int   content_h_;
+    float wait_, speed_;
+    float cur_ = 0.0f, target_ = 0.0f;
+    bool  scrolling_ = false;
+    chrono::steady_clock::time_point last_;
+};
 
 // -------------------------------------------------------------------------
 // Scroller state — rebuilt every time data changes
 // -------------------------------------------------------------------------
 struct ScrollerState {
-    ScrollingTextBox *firstDestScroller  = nullptr;
-    ScrollingTextBox *firstViaScroller   = nullptr;
-    ScrollingTextBox *firstNoteScroller  = nullptr;
-    ScrollingTextBox *tickerScroller     = nullptr;
+    ScrollingTextBox *heroDest       = nullptr;
+    ScrollingTextBox *heroVia        = nullptr;
+    ScrollingTextBox *heroNote       = nullptr;
+    ScrollingTextBox *tickerScroller = nullptr;
     vector<ScrollingTextBox*> destScrollers;
     vector<ScrollingTextBox*> noteScrollers;
-    ViewPort         *listVP             = nullptr;
-    PageScroller     *pageScroll         = nullptr;
-    led_util::ScrollBar *scrollBar       = nullptr;
+    ViewPort          *listVP     = nullptr;
+    DepartureScroller *pageScroll = nullptr;
+    led_util::ScrollBar *scrollBar = nullptr;
 
-    vector<int> row_y_offsets;
-    int content_h    = 0;
-    int row_h        = 0;
-    int list_y       = 0;
-    int list_h       = 0;
-    int ticker_h     = 0;
-    bool dep0_has_note = false;
+    // Hero block geometry (screen coordinates)
+    RowStyle hero_style;
+    int hero_top = 0, hero_h = 0;
+    int hero_baseline = 0, hero_via_baseline = 0, hero_note_baseline = 0;
+
+    // List rows: start offset and full height (including any reason line)
+    vector<int>      row_y_offsets;
+    vector<int>      row_heights;
+    vector<RowStyle> row_styles;
+
+    int content_h = 0;
+    int row_h     = 0;
+    int list_y    = 0;
+    int list_h    = 0;
+    int ticker_h  = 0;
 
     void destroy() {
-        delete firstDestScroller; firstDestScroller = nullptr;
-        delete firstViaScroller;  firstViaScroller  = nullptr;
-        delete firstNoteScroller; firstNoteScroller = nullptr;
-        delete tickerScroller;    tickerScroller    = nullptr;
+        delete heroDest;       heroDest       = nullptr;
+        delete heroVia;        heroVia        = nullptr;
+        delete heroNote;       heroNote       = nullptr;
+        delete tickerScroller; tickerScroller = nullptr;
         for (auto *s : destScrollers) delete s;
         destScrollers.clear();
         for (auto *s : noteScrollers) delete s;
@@ -404,10 +528,32 @@ struct ScrollerState {
         delete listVP;     listVP     = nullptr;
         delete scrollBar;  scrollBar  = nullptr;
         row_y_offsets.clear();
+        row_heights.clear();
+        row_styles.clear();
     }
 
     ~ScrollerState() { destroy(); }
 };
+
+// Join a departure's notes into one line.
+static string joinNotes(const Departure &dep) {
+    string s;
+    for (size_t n = 0; n < dep.notes.size(); ++n) {
+        if (n > 0) s += " | ";
+        s += dep.notes[n].text;
+    }
+    return s;
+}
+
+// --- Vertical layout constants ---
+static const int HERO_BASELINE = 27;  // 3 px higher than it used to sit
+
+// Pull a list row's reason line up toward the departure it belongs to. 2 px
+// is all the slack there is: the 5x8 glyphs reach 7 px above the baseline
+// (ÄÖÜ) and 1 px below it (,.Qgjpqy), so 8 px between baselines is the
+// closest two of these lines can sit without their ink touching. The hero's
+// via/reason lines are already at that minimum and are left alone.
+static const int NOTE_TIGHTEN  = 2;
 
 // Build all scrollers for the current departure list.
 static void buildScrollers(ScrollerState &ss,
@@ -415,102 +561,161 @@ static void buildScrollers(ScrollerState &ss,
                            const Font &bigFont, const Font &smallFont,
                            const vector<Departure> &list,
                            const string &ticker,
-                           int width, int height, const Columns &cols) {
+                           int width, int height,
+                           const Columns &heroCols, const Columns &listCols) {
     ss.destroy();
 
-    // Destination x inside the list viewport: the same screen column as the
-    // first departure's, shifted back by where the viewport itself starts.
-    const int list_dest_x = cols.dest_x - LIST_CONTENT_X;
+    // --- Hero block ---
+    ss.hero_style          = styleFor(list[0]);
+    ss.hero_baseline       = HERO_BASELINE;
+    ss.hero_via_baseline   = ss.hero_baseline + smallFont.height();
+    ss.hero_note_baseline  = ss.hero_via_baseline + smallFont.height();
 
-    // --- Layout constants ---
-    const int first_dep_baseline = 30;
-    const int via_baseline       = first_dep_baseline + smallFont.height();
-    const int note0_baseline     = via_baseline + smallFont.height();
-    ss.row_h                     = smallFont.height() + 2;
-    ss.dep0_has_note             = !list[0].notes.empty();
-    ss.list_y                    = (ss.dep0_has_note ? note0_baseline : via_baseline) + 4;
-    ss.ticker_h                  = ticker.empty() ? 0 : (smallFont.height() + 2);
-    ss.list_h                    = height - ss.list_y - ss.ticker_h;
+    const bool hero_has_note   = !list[0].notes.empty();
+    const int  hero_last_base  = hero_has_note ? ss.hero_note_baseline
+                                               : ss.hero_via_baseline;
+    ss.hero_top = ss.hero_baseline - bigFont.baseline();
+    ss.hero_h   = (hero_last_base - smallFont.baseline() + smallFont.height())
+                  - ss.hero_top;
 
-    // First departure scrollers
-    ss.firstDestScroller = new ScrollingTextBox(
-        canvas, cols.dest_x, first_dep_baseline - bigFont.baseline(),
-        cols.dest_w, bigFont.height(),
-        bigFont, list[0].cancelled ? Color(0, 0, 120)
-               : busStyled(list[0]) ? BUS_FG : Color(255, 255, 255), list[0].dest,
-        20.0f, 2.0f, 12);
+    ss.row_h    = smallFont.height() + 2;
+    ss.ticker_h = ticker.empty() ? 0 : (smallFont.height() + 2);
+    ss.list_y   = ss.hero_top + ss.hero_h + 3;
+    ss.list_h   = height - ss.list_y - ss.ticker_h;
 
-    string via_text = "via " + list[0].stops;
-    ss.firstViaScroller = new ScrollingTextBox(
-        canvas, cols.dest_x, via_baseline - smallFont.baseline(),
-        cols.dest_w, smallFont.height(),
-        smallFont, Color(180, 180, 180), via_text,
-        20.0f, 2.0f, 12);
+    ss.heroDest = new ScrollingTextBox(
+        canvas, heroCols.dest_x, ss.hero_baseline - bigFont.baseline(),
+        heroCols.dest_w, bigFont.height(),
+        bigFont, ss.hero_style.fg, list[0].dest, 20.0f, 2.0f, 12);
 
-    if (ss.dep0_has_note) {
-        string note0_str;
-        for (size_t n = 0; n < list[0].notes.size(); ++n) {
-            if (n > 0) note0_str += " | ";
-            note0_str += list[0].notes[n].text;
-        }
-        ss.firstNoteScroller = new ScrollingTextBox(
-            canvas, cols.dest_x, note0_baseline - smallFont.baseline(),
-            cols.dest_w, smallFont.height(),
-            smallFont, Color(255, 180, 0), note0_str,
-            20.0f, 2.0f, 12);
+    ss.heroVia = new ScrollingTextBox(
+        canvas, heroCols.dest_x, ss.hero_via_baseline - smallFont.baseline(),
+        heroCols.dest_w, smallFont.height(),
+        smallFont, ss.hero_style.via, "via " + list[0].stops, 20.0f, 2.0f, 12);
+
+    if (hero_has_note) {
+        ss.heroNote = new ScrollingTextBox(
+            canvas, heroCols.dest_x, ss.hero_note_baseline - smallFont.baseline(),
+            heroCols.dest_w, smallFont.height(),
+            smallFont, ss.hero_style.note, joinNotes(list[0]), 20.0f, 2.0f, 12);
     }
 
-    // Page-scroller viewport for departures 1..N
-    int total_content_h = 0;
-    for (int i = 1; i < (int)list.size(); ++i) {
-        ss.row_y_offsets.push_back(total_content_h);
-        total_content_h += ss.row_h;
-        if (!list[i].notes.empty()) total_content_h += ss.row_h;
+    // --- List rows: measure each departure's full height up front ---
+    const int note_h = ss.row_h - NOTE_TIGHTEN;
+    int total = 0;
+    for (size_t i = 1; i < list.size(); ++i) {
+        const int h = ss.row_h + (list[i].notes.empty() ? 0 : note_h);
+        ss.row_y_offsets.push_back(total);
+        ss.row_heights.push_back(h);
+        ss.row_styles.push_back(styleFor(list[i]));
+        total += h;
     }
-    ss.content_h = total_content_h;
+    ss.content_h = total;
 
-    ss.listVP    = new ViewPort(canvas, LIST_CONTENT_X, ss.list_y,
-                                width - LIST_CONTENT_X, ss.list_h);
-    ss.pageScroll = new PageScroller(ss.listVP, ss.content_h, ss.row_h, 3.0f, 40.0f);
-    ss.scrollBar  = new led_util::ScrollBar(canvas, SCROLLBAR_X, ss.list_y, ss.list_h, SCROLLBAR_W);
+    ss.listVP = new ViewPort(canvas, LIST_CONTENT_X, ss.list_y,
+                             width - LIST_CONTENT_X, ss.list_h);
+    ss.pageScroll = new DepartureScroller(ss.listVP, ss.row_y_offsets,
+                                          ss.row_heights, ss.content_h,
+                                          3.0f, 40.0f);
+    ss.scrollBar  = new led_util::ScrollBar(canvas, SCROLLBAR_X, ss.list_y,
+                                            ss.list_h, SCROLLBAR_W);
 
     // Ticker (only when there are station messages)
     if (!ticker.empty()) {
         ss.tickerScroller = new ScrollingTextBox(
             canvas, 0, height - ss.ticker_h,
             width, ss.ticker_h,
-            smallFont, Color(200, 0, 0),
-            ticker,
+            smallFont, Color(200, 0, 0), ticker,
             35.0f, 2.0f, 40);
     }
 
-    // Per-departure scrollers for list entries
-    for (int i = 1; i < (int)list.size(); ++i) {
-        int idx        = i - 1;
-        int y_pos      = ss.row_y_offsets[idx];
-        // Cancelled rows draw their destination via this scroller too (blue
-        // on the inverted white row), so long names still clip and scroll
-        // instead of running into the time column.
+    for (size_t i = 1; i < list.size(); ++i) {
+        const size_t idx = i - 1;
+        const int y_pos  = ss.row_y_offsets[idx];
+        const RowStyle &st = ss.row_styles[idx];
+
         ss.destScrollers.push_back(new ScrollingTextBox(
-            ss.listVP, list_dest_x, y_pos + 1,
-            cols.dest_w, ss.row_h,
-            smallFont, list[i].cancelled ? Color(0, 0, 120)
-                     : busStyled(list[i]) ? BUS_FG : Color(255, 255, 255), list[i].dest,
-            20.0f, 1.5f, 12));
+            ss.listVP, listCols.dest_x, y_pos + 1,
+            listCols.dest_w, ss.row_h,
+            smallFont, st.fg, list[i].dest, 20.0f, 1.5f, 12));
+
         if (!list[i].notes.empty()) {
-            string note_str;
-            for (size_t n = 0; n < list[i].notes.size(); ++n) {
-                if (n > 0) note_str += " | ";
-                note_str += list[i].notes[n].text;
-            }
+            // The reason line only has to clear the platform -- it may run
+            // under the line number, which buys it a lot of reading width.
             ss.noteScrollers.push_back(new ScrollingTextBox(
-                ss.listVP, list_dest_x, y_pos + ss.row_h + 1,
-                cols.dest_w, ss.row_h,
-                smallFont, Color(255, 180, 0), note_str,
-                20.0f, 2.0f, 12));
+                ss.listVP, listCols.line_x, y_pos + ss.row_h - NOTE_TIGHTEN + 1,
+                listCols.note_w, note_h,
+                smallFont, st.note, joinNotes(list[i]), 20.0f, 2.0f, 12));
         } else {
             ss.noteScrollers.push_back(nullptr);
         }
+    }
+}
+
+// -------------------------------------------------------------------------
+// Block renderers — one for the hero, one for a list row. Both take their
+// colours from the row's RowStyle, so neither has to know about buses or
+// cancellations.
+// -------------------------------------------------------------------------
+static void drawHero(Canvas *c, const Font &bigFont,
+                     const Departure &dep, const ScrollerState &ss,
+                     const Columns &cols, int width) {
+    const RowStyle &st = ss.hero_style;
+    if (st.fillBg)
+        drawRowBg(c, 0, ss.hero_top, width, ss.hero_h, st.bg_r, st.bg_g, st.bg_b);
+
+    drawPlatform(c, bigFont, cols.plat_x, ss.hero_baseline, dep, cols.plat_w, st);
+    DrawTextHalfSpace(c, bigFont, cols.line_x, ss.hero_baseline,
+                      st.lineTypeColor ? lineColor(dep.line) : st.fg, dep.line);
+
+    ss.heroDest->SetCanvas(c);
+    ss.heroDest->Update();
+
+    int pt_w = DrawText(c, bigFont, cols.time_x, ss.hero_baseline,
+                        st.fg, nullptr, dep.pTime.c_str());
+    if (st.strikeTime)
+        drawStrikethrough(c, cols.time_x, ss.hero_baseline, pt_w, bigFont);
+    else if (!dep.cTime.empty())
+        DrawText(c, bigFont, cols.time_x + pt_w + 2, ss.hero_baseline,
+                 st.delay, nullptr, dep.cTime.c_str());
+
+    ss.heroVia->SetCanvas(c);
+    ss.heroVia->Update();
+    if (ss.heroNote) {
+        ss.heroNote->SetCanvas(c);
+        ss.heroNote->Update();
+    }
+}
+
+static void drawListRow(Canvas *vp, const Font &smallFont,
+                        const Departure &dep, const ScrollerState &ss,
+                        const Columns &cols, int idx, int width) {
+    const RowStyle &st = ss.row_styles[idx];
+    const int y_pos    = ss.row_y_offsets[idx];
+    const int baseline = y_pos + smallFont.baseline() + 1;
+
+    if (st.fillBg)
+        drawRowBg(vp, 0, y_pos, width, ss.row_heights[idx],
+                  st.bg_r, st.bg_g, st.bg_b);
+
+    drawPlatform(vp, smallFont, cols.plat_x, baseline, dep, cols.plat_w, st);
+    DrawTextHalfSpace(vp, smallFont, cols.line_x, baseline,
+                      st.lineTypeColor ? lineColor(dep.line) : st.fg, dep.line);
+
+    ss.destScrollers[idx]->SetCanvas(vp);
+    ss.destScrollers[idx]->Update();
+
+    int pt_w = DrawText(vp, smallFont, cols.time_x, baseline,
+                        st.fg, nullptr, dep.pTime.c_str());
+    if (st.strikeTime)
+        drawStrikethrough(vp, cols.time_x, baseline, pt_w, smallFont);
+    else if (!dep.cTime.empty())
+        DrawText(vp, smallFont, cols.time_x + pt_w + 2, baseline,
+                 st.delay, nullptr, dep.cTime.c_str());
+
+    if (ss.noteScrollers[idx]) {
+        ss.noteScrollers[idx]->SetCanvas(vp);
+        ss.noteScrollers[idx]->Update();
     }
 }
 
@@ -603,17 +808,17 @@ int main(int argc, char **argv) {
         }
     }
 
-    // --- Column layout, shared by the first departure and the list rows ---
-    Columns cols = computeColumns(bigFont, smallFont, list, width);
+    // --- Column layout, measured independently for the hero and the list ---
+    Columns heroCols = heroColumns(bigFont, list, width);
+    Columns listCols = listColumns(smallFont, list, width);
 
     // Layout constants
-    const int header_bottom      = 14;
-    const int first_dep_baseline = 30;
+    const int header_bottom = 14;
 
     // Build initial scroller state
     ScrollerState ss;
     buildScrollers(ss, off, bigFont, smallFont, list, ticker,
-                   width, height, cols);
+                   width, height, heroCols, listCols);
 
     // --- Background fetch thread (live mode only) ---
     struct SharedFetchData {
@@ -675,10 +880,11 @@ int main(int argc, char **argv) {
                 ticker  = std::move(newTicker);
 
                 // Re-measure the columns in case platform or line names changed
-                cols = computeColumns(bigFont, smallFont, list, width);
+                heroCols = heroColumns(bigFont, list, width);
+                listCols = listColumns(smallFont, list, width);
 
                 buildScrollers(ss, off, bigFont, smallFont, list, ticker,
-                               width, height, cols);
+                               width, height, heroCols, listCols);
             }
         }
 
@@ -688,7 +894,7 @@ int main(int argc, char **argv) {
         c->Fill(0, 0, 120);
 
         // Station name header
-        DrawText(c, bigFont, cols.plat_x, bigFont.baseline() + 1,
+        DrawText(c, bigFont, heroCols.plat_x, bigFont.baseline() + 1,
                  Color(255, 255, 255), nullptr, station.c_str());
 
         // Clock in the top-right corner. The patch behind it is cleared
@@ -713,41 +919,8 @@ int main(int argc, char **argv) {
         for (int x = 0; x < width; ++x)
             c->SetPixel(x, header_bottom, 255, 255, 255);
 
-        // --- First departure (big font) ---
-        Departure &d = list[0];
-        {
-            int row_top = first_dep_baseline - bigFont.baseline();
-            if (d.cancelled)
-                drawInvertedRowBg(c, 0, row_top, width, bigFont.height());
-            else if (busStyled(d))
-                drawRowBg(c, 0, row_top, width, bigFont.height(),
-                          BUS_BG_R, BUS_BG_G, BUS_BG_B);
-        }
-        {
-            Color textCol = d.cancelled  ? Color(0, 0, 120)
-                          : busStyled(d) ? BUS_FG : Color(255, 255, 255);
-            drawPlatform(c, bigFont, cols.plat_x, first_dep_baseline, d, cols.plat_w,
-                         textCol);
-            DrawTextHalfSpace(c, bigFont, cols.line_x, first_dep_baseline,
-                              (d.cancelled || busStyled(d)) ? textCol : lineColor(d.line),
-                              d.line);
-            ss.firstDestScroller->SetCanvas(c);
-            ss.firstDestScroller->Update();
-            int pt0_w = DrawText(c, bigFont, cols.time_x, first_dep_baseline,
-                                 textCol, nullptr, d.pTime.c_str());
-            if (d.cancelled) {
-                drawStrikethrough(c, cols.time_x, first_dep_baseline, pt0_w, bigFont);
-            } else if (!d.cTime.empty()) {
-                DrawText(c, bigFont, cols.time_x + pt0_w + 2, first_dep_baseline,
-                         Color(255, 60, 60), nullptr, d.cTime.c_str());
-            }
-            ss.firstViaScroller->SetCanvas(c);
-            ss.firstViaScroller->Update();
-            if (ss.firstNoteScroller) {
-                ss.firstNoteScroller->SetCanvas(c);
-                ss.firstNoteScroller->Update();
-            }
-        }
+        // --- Hero block (first departure, big font) ---
+        drawHero(c, bigFont, list[0], ss, heroCols, width);
 
         // --- Following departures inside page-scrolled list ---
         ss.listVP->SetParent(c);
@@ -758,52 +931,9 @@ int main(int argc, char **argv) {
                            60, 60, 60,
                            255, 255, 255);
 
-        // Inside the viewport every column sits LIST_CONTENT_X further left
-        // than its screen position, which puts it in the same place on the
-        // panel as the first departure's above.
-        const int vp_plat_x = cols.plat_x - LIST_CONTENT_X;
-        const int vp_line_x = cols.line_x - LIST_CONTENT_X;
-        const int vp_time_x = cols.time_x - LIST_CONTENT_X;
-
-        for (int i = 1; i < (int)list.size(); ++i) {
-            int idx      = i - 1;
-            int y_pos    = ss.row_y_offsets[idx];
-            int baseline = y_pos + smallFont.baseline() + 1;
-
-            if (list[i].cancelled) {
-                drawInvertedRowBg(ss.listVP, 0, y_pos, width, ss.row_h);
-                DrawTextHalfSpace(ss.listVP, smallFont, vp_plat_x, baseline,
-                                  Color(0, 0, 120), platformLabel(list[i]));
-                DrawTextHalfSpace(ss.listVP, smallFont, vp_line_x, baseline,
-                                  Color(0, 0, 120), list[i].line);
-                ss.destScrollers[idx]->SetCanvas(ss.listVP);
-                ss.destScrollers[idx]->Update();
-                int tw = DrawText(ss.listVP, smallFont, vp_time_x, baseline,
-                                  Color(0, 0, 120), nullptr, list[i].pTime.c_str());
-                drawStrikethrough(ss.listVP, vp_time_x, baseline, tw, smallFont);
-            } else {
-                bool bus = busStyled(list[i]);
-                if (bus)
-                    drawRowBg(ss.listVP, 0, y_pos, width, ss.row_h,
-                              BUS_BG_R, BUS_BG_G, BUS_BG_B);
-                Color rowCol = bus ? BUS_FG : Color(255, 255, 255);
-                drawPlatform(ss.listVP, smallFont, vp_plat_x, baseline, list[i],
-                             cols.plat_w, rowCol);
-                DrawTextHalfSpace(ss.listVP, smallFont, vp_line_x, baseline,
-                                  bus ? rowCol : lineColor(list[i].line), list[i].line);
-                ss.destScrollers[idx]->SetCanvas(ss.listVP);
-                ss.destScrollers[idx]->Update();
-                int pt_w = DrawText(ss.listVP, smallFont, vp_time_x, baseline,
-                                    rowCol, nullptr, list[i].pTime.c_str());
-                DrawText(ss.listVP, smallFont, vp_time_x + pt_w + 2, baseline,
-                         Color(255, 60, 60), nullptr, list[i].cTime.c_str());
-            }
-
-            if (ss.noteScrollers[idx]) {
-                ss.noteScrollers[idx]->SetCanvas(ss.listVP);
-                ss.noteScrollers[idx]->Update();
-            }
-        }
+        for (int i = 1; i < (int)list.size(); ++i)
+            drawListRow(ss.listVP, smallFont, list[i], ss, listCols, i - 1,
+                        width - LIST_CONTENT_X);
 
         // --- Ticker strip at bottom (only when active) ---
         if (ss.tickerScroller) {
