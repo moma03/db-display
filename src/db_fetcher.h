@@ -18,6 +18,8 @@ struct FetchedNote {
 };
 
 struct FetchedDeparture {
+    std::string stop_id;         // "<dailyTripId>-<YYMMddHHmm>-<stopIndex>"
+    std::string wings;           // pipe-separated trip ids of coupled wing parts
     std::string platform;        // planned platform
     std::string cPlatform;       // changed platform (empty if unchanged)
     std::string line;            // e.g. "RE 11", "S 1", "ICE 123"

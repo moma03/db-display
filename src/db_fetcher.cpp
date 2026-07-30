@@ -142,6 +142,7 @@ int FetchDepartures(const DBConnectionConfig &cfg,
         "  p.planned_destination, "
         "  p.planned_time, "
         "  p.planned_path, "
+        "  p.wings, "
         "  p.category, "
         "  p.train_number, "
         "  c.changed_time, "
@@ -201,6 +202,8 @@ int FetchDepartures(const DBConnectionConfig &cfg,
     int nRows = PQntuples(res);
 
     // Column indices
+    int cStopId   = PQfnumber(res, "stop_id");
+    int cWings    = PQfnumber(res, "wings");
     int cPPlat    = PQfnumber(res, "planned_platform");
     int cPLine    = PQfnumber(res, "planned_line");
     int cPDest    = PQfnumber(res, "planned_destination");
@@ -217,6 +220,10 @@ int FetchDepartures(const DBConnectionConfig &cfg,
 
     for (int r = 0; r < nRows; ++r) {
         FetchedDeparture dep;
+
+        // Identity + wing links (used by the display to group coupled trains)
+        dep.stop_id = getField(res, r, cStopId);
+        dep.wings   = getField(res, r, cWings);
 
         // Platform
         dep.platform = getField(res, r, cPPlat);

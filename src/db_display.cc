@@ -10,6 +10,8 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <unordered_map>
+#include <functional>
 #include <chrono>
 #include <thread>
 #include <mutex>
@@ -93,6 +95,11 @@ struct Departure {
     vector<Note> notes; bool cancelled = false;
     string category;        // "RE", "S", "ICE", "Bus", ... (empty if unknown)
     bool destChanged = false;   // destination differs from the planned one
+    string stop_id;         // "<tripId>-<stopIndex>"
+    string wings;           // pipe-separated trip ids of coupled parts
+    // Filled in by groupWings(): members of a wing group are made adjacent.
+    int wingCount = 1;      // parts in this train's wing group (1 = solo)
+    int wingPos   = 0;      // 0-based position of this part within the group
 };
 
 // Replacement-bus services have no track, so their platform arrives empty;
@@ -121,7 +128,8 @@ static bool operator==(const Departure &a, const Departure &b) {
            a.pTime == b.pTime && a.cTime == b.cTime &&
            a.stops == b.stops && a.cancelled == b.cancelled &&
            a.category == b.category && a.destChanged == b.destChanged &&
-           a.notes == b.notes;
+           a.wings == b.wings && a.wingCount == b.wingCount &&
+           a.wingPos == b.wingPos && a.notes == b.notes;
 }
 
 // -------------------------------------------------------------------------
@@ -139,9 +147,95 @@ static Departure fromFetched(const FetchedDeparture &fd) {
     d.cancelled   = fd.cancelled;
     d.category    = fd.category;
     d.destChanged = fd.destChanged;
+    d.stop_id     = fd.stop_id;
+    d.wings       = fd.wings;
     for (auto &fn : fd.notes)
         d.notes.push_back({fn.id, fn.text});
     return d;
+}
+
+// -------------------------------------------------------------------------
+// Wing grouping
+// -------------------------------------------------------------------------
+// A wing train ("Flügelzug") departs coupled and splits en route, each part
+// keeping to a different destination. Both parts stop here, at the same time
+// on the same platform, as two separate departures linked by their `wings`
+// field (a list of the partner's trip ids). This makes the parts adjacent in
+// the list and tags each with its position in the group so the renderer can
+// draw one bracket around them.
+
+// Trip id = the stop_id without its trailing "-<stopIndex>". The daily trip id
+// may itself be negative (leading '-'), so strip only the final segment.
+static string tripIdOf(const string &stop_id) {
+    size_t p = stop_id.rfind('-');
+    return (p == string::npos) ? stop_id : stop_id.substr(0, p);
+}
+
+static vector<string> parseWings(const string &wings) {
+    vector<string> out;
+    size_t start = 0;
+    while (start < wings.size()) {
+        size_t bar = wings.find('|', start);
+        size_t end = (bar == string::npos) ? wings.size() : bar;
+        if (end > start) out.push_back(wings.substr(start, end - start));
+        if (bar == string::npos) break;
+        start = bar + 1;
+    }
+    return out;
+}
+
+// Reorder `list` so wing partners are contiguous (anchored at the earliest
+// member, preserving the incoming time order otherwise) and fill in each
+// departure's wingCount / wingPos.
+static void groupWings(vector<Departure> &list) {
+    const int n = (int)list.size();
+    if (n < 2) return;
+
+    // Union-find over departure indices.
+    vector<int> parent(n);
+    for (int i = 0; i < n; ++i) parent[i] = i;
+    function<int(int)> find = [&](int x) {
+        while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+        return x;
+    };
+    auto unite = [&](int a, int b) { parent[find(a)] = find(b); };
+
+    unordered_map<string, int> byTrip;
+    for (int i = 0; i < n; ++i)
+        if (!list[i].stop_id.empty())
+            byTrip[tripIdOf(list[i].stop_id)] = i;
+
+    for (int i = 0; i < n; ++i)
+        for (const string &w : parseWings(list[i].wings)) {
+            auto it = byTrip.find(w);
+            if (it != byTrip.end() && it->second != i)
+                unite(i, it->second);
+        }
+
+    // Rebuild in original order, emitting each group's members together the
+    // first time the group is encountered.
+    vector<Departure> out;
+    out.reserve(n);
+    vector<bool> done(n, false);
+    for (int i = 0; i < n; ++i) {
+        if (done[i]) continue;
+        int root = find(i), pos = 0, count = 0;
+        for (int j = i; j < n; ++j) if (find(j) == root) ++count;
+        for (int j = i; j < n; ++j) {
+            if (find(j) != root) continue;
+            done[j] = true;
+            list[j].wingCount = count;
+            list[j].wingPos   = pos++;
+            out.push_back(std::move(list[j]));
+        }
+    }
+    list = std::move(out);
+}
+
+// Number of leading departures that form the hero's wing group.
+static int heroGroupSize(const vector<Departure> &list) {
+    if (list.empty()) return 0;
+    return min(list[0].wingCount, (int)list.size());
 }
 
 // -------------------------------------------------------------------------
@@ -149,8 +243,9 @@ static Departure fromFetched(const FetchedDeparture &fd) {
 // -------------------------------------------------------------------------
 static void loadDummyData(vector<Departure> &list, string &station, string &ticker) {
     list = {
-        {"1", "",  "RE 11", "Dortmund Hbf", "12:38", "12:40", "Düsseldorf Hbf, Duisburg Hbf",{{1, "technische Störung am Zug"}}, false},
-        {"2", "",  "S 1", "Solingen Hbf", "12:42", "12:45", "Düsseldorf Hbf, Neuss Hbf"},
+        // Wing pair as the next departure -> rendered as two big hero rows.
+        {"1", "",  "RE 11", "Dortmund Hbf", "12:38", "12:40", "Kamen, Unna", {{1, "technische Störung am Zug"}}, false, "", false, "100-2507311238-3", "200-2507311238"},
+        {"1", "",  "RE 11", "Iserlohn", "12:38", "12:40", "Kamen, Menden", {}, false, "", false, "200-2507311238-3", "100-2507311238"},
         {"3", "5", "S 11", "Düsseldorf Flughafen Terminal", "12:35", "12:37", "Düsseldorf Hbf", {{1, "Verspätung wegen technischer Störung"}}},
         {"4", "",  "RE 6", "Minden (Westf)", "12:50", "12:55", "Düsseldorf Hbf, Duisburg Hbf, Oberhausen Hbf"},
         {"5", "",  "S 8", "Wuppertal-Oberbarmen", "12:40", "12:42", "Düsseldorf Hbf, Neuss Hbf, Krefeld Hbf"},
@@ -159,8 +254,9 @@ static void loadDummyData(vector<Departure> &list, string &station, string &tick
         {"3", "",  "S 11", "Düsseldorf Flughafen Terminal", "12:35", "12:37", "Düsseldorf Hbf", {{1, "Verspätung wegen technischer Störung"}}},
         {"4", "",  "RE 6", "Minden (Westf)", "12:50", "12:55", "Düsseldorf Hbf, Duisburg Hbf, Oberhausen Hbf", {}, true},
         {"5", "",  "S 8", "Wuppertal-Oberbarmen", "12:40", "12:42", "Düsseldorf Hbf, Neuss Hbf, Krefeld Hbf"},
-        {"1", "",  "RE 11", "Dortmund Hbf", "12:38", "12:40", "Düsseldorf Hbf, Duisburg Hbf"},
-        {"2", "",  "S 1", "Solingen Hbf", "12:42", "12:45", "Düsseldorf Hbf, Neuss Hbf"},
+        // Wing pair further down -> grouped and bracketed inside the list.
+        {"4", "",  "RB 89", "Paderborn Hbf", "13:02", "", "Soest, Lippstadt", {}, false, "", false, "300-2507311302-5", "400-2507311302"},
+        {"4", "",  "RB 89", "Warburg (Westf)", "13:02", "", "Soest, Lippstadt", {{1, "Zug wird geflügelt"}}, false, "", false, "400-2507311302-5", "300-2507311302"},
         {"3", "5", "S 11", "Düsseldorf Flughafen Terminal", "12:35", "12:37", "Düsseldorf Hbf", {{1, "Verspätung wegen technischer Störung"}}},
         {"4", "",  "RE 6", "Minden (Westf)", "12:50", "12:55", "Düsseldorf Hbf, Duisburg Hbf, Oberhausen Hbf"},
         {"5", "",  "S 8", "Wuppertal-Oberbarmen", "12:40", "12:42", "Düsseldorf Hbf, Neuss Hbf, Krefeld Hbf"},
@@ -170,6 +266,7 @@ static void loadDummyData(vector<Departure> &list, string &station, string &tick
     };
     station = "Steinheim (Westf.)";
     ticker  = "Ein Unwetter behindert den Bahnverkehr. Für weitere Informationen beachten Sie Durchsagen.";
+    groupWings(list);
 }
 
 // -------------------------------------------------------------------------
@@ -200,6 +297,7 @@ static bool loadLiveData(const DBConnectionConfig &dbCfg,
         list.push_back(placeholder);
     }
 
+    groupWings(list);   // make wing partners adjacent + tag their positions
     return true;
 }
 
@@ -349,8 +447,12 @@ void drawPlatform(Canvas *canvas, const Font &font, int x, int baseline,
 // Hero columns are in screen coordinates. List columns are relative to the
 // list ViewPort (which itself starts at LIST_CONTENT_X), so list drawing uses
 // them as-is.
+// A "[" grouping bracket for wing trains: a 1px vertical bar with 3px ticks.
+static const int BRACKET_W = 3;
+
 struct Columns {
     int plat_x = 0;
+    int bracket_x = -1;   // x of the wing bracket, or -1 when the region has none
     int line_x = 0;
     int dest_x = 0;
     int time_x = 0;   // left edge of the time column
@@ -361,9 +463,12 @@ struct Columns {
 
 // `deps` are the departures drawn in `font`; `x0` is the left margin and
 // `width` the space available in whatever coordinate system they live in.
+// When `wings` is set, a gutter is reserved after the platform for the
+// grouping bracket and the line column is indented to clear it -- applied to
+// every row in the region so wing and non-wing rows stay aligned.
 static Columns computeColumns(const Font &font,
                               const vector<const Departure*> &deps,
-                              int x0, int width) {
+                              int x0, int width, bool wings) {
     Columns c;
     c.plat_x = x0;
 
@@ -380,7 +485,13 @@ static Columns computeColumns(const Font &font,
         reserve = max(reserve, w);
     }
 
-    c.line_x = c.plat_x + c.plat_w + 3;
+    int after_plat = c.plat_x + c.plat_w;
+    if (wings) {
+        c.bracket_x = after_plat + 2;
+        c.line_x    = c.bracket_x + BRACKET_W + 2;
+    } else {
+        c.line_x    = after_plat + 3;
+    }
     c.dest_x = c.line_x + line_w + 4;
     c.time_x = width - reserve;
     c.dest_w = max(1, c.time_x - c.dest_x - 2);
@@ -389,16 +500,22 @@ static Columns computeColumns(const Font &font,
 }
 
 static Columns heroColumns(const Font &bigFont, const vector<Departure> &list,
-                           int width) {
-    return computeColumns(bigFont, {&list[0]}, 5, width);
+                           int heroCount, int width) {
+    vector<const Departure*> deps;
+    for (int i = 0; i < heroCount; ++i) deps.push_back(&list[i]);
+    return computeColumns(bigFont, deps, 5, width, heroCount > 1);
 }
 
 static Columns listColumns(const Font &smallFont, const vector<Departure> &list,
-                           int width) {
+                           int heroCount, int width) {
     vector<const Departure*> deps;
-    for (size_t i = 1; i < list.size(); ++i) deps.push_back(&list[i]);
+    bool wings = false;
+    for (size_t i = heroCount; i < list.size(); ++i) {
+        deps.push_back(&list[i]);
+        if (list[i].wingCount > 1) wings = true;
+    }
     // x0 = 1 leaves room for the changed-platform box, which starts at x-1.
-    return computeColumns(smallFont, deps, 1, width - LIST_CONTENT_X);
+    return computeColumns(smallFont, deps, 1, width - LIST_CONTENT_X, wings);
 }
 
 void drawStrikethrough(Canvas *canvas, int x, int baseline, int text_w,
@@ -406,6 +523,18 @@ void drawStrikethrough(Canvas *canvas, int x, int baseline, int text_w,
     int mid_y = baseline - font.baseline() / 2;
     for (int px = x; px < x + text_w; ++px)
         canvas->SetPixel(px, mid_y, 255, 0, 0);
+}
+
+// A "[" spanning [y_top, y_bottom): vertical bar at x with short top/bottom
+// ticks, marking a wing group's rows as one coupled train.
+static void drawWingBracket(Canvas *canvas, int x, int y_top, int y_bottom,
+                            const Color &col) {
+    for (int y = y_top; y < y_bottom; ++y)
+        canvas->SetPixel(x, y, col.r, col.g, col.b);
+    for (int dx = 0; dx < BRACKET_W; ++dx) {
+        canvas->SetPixel(x + dx, y_top, col.r, col.g, col.b);
+        canvas->SetPixel(x + dx, y_bottom - 1, col.r, col.g, col.b);
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -502,7 +631,7 @@ private:
 // Scroller state — rebuilt every time data changes
 // -------------------------------------------------------------------------
 struct ScrollerState {
-    ScrollingTextBox *heroDest       = nullptr;
+    vector<ScrollingTextBox*> heroDests;   // one per wing part
     ScrollingTextBox *heroVia        = nullptr;
     ScrollingTextBox *heroNote       = nullptr;
     ScrollingTextBox *tickerScroller = nullptr;
@@ -514,6 +643,7 @@ struct ScrollerState {
 
     // Hero block geometry (screen coordinates)
     RowStyle hero_style;
+    int hero_count = 1;   // wing parts drawn big up top
     int hero_top = 0, hero_h = 0;
     int hero_baseline = 0, hero_via_baseline = 0, hero_note_baseline = 0;
 
@@ -529,7 +659,8 @@ struct ScrollerState {
     int ticker_h  = 0;
 
     void destroy() {
-        delete heroDest;       heroDest       = nullptr;
+        for (auto *s : heroDests) delete s;
+        heroDests.clear();
         delete heroVia;        heroVia        = nullptr;
         delete heroNote;       heroNote       = nullptr;
         delete tickerScroller; tickerScroller = nullptr;
@@ -574,19 +705,27 @@ static void buildScrollers(ScrollerState &ss,
                            const Font &bigFont, const Font &smallFont,
                            const vector<Departure> &list,
                            const string &ticker,
-                           int width, int height,
+                           int width, int height, int heroCount,
                            const Columns &heroCols, const Columns &listCols) {
     ss.destroy();
 
-    // --- Hero block ---
-    ss.hero_style          = styleFor(list[0]);
-    ss.hero_baseline       = HERO_BASELINE;
-    ss.hero_via_baseline   = ss.hero_baseline + smallFont.height();
-    ss.hero_note_baseline  = ss.hero_via_baseline + smallFont.height();
+    // --- Hero block: 1..heroCount wing parts as big rows, then via + notes ---
+    ss.hero_style    = styleFor(list[0]);
+    ss.hero_count    = heroCount;
+    ss.hero_baseline = HERO_BASELINE;
+    const int last_part_base = HERO_BASELINE + (heroCount - 1) * bigFont.height();
+    ss.hero_via_baseline  = last_part_base + smallFont.height();
+    ss.hero_note_baseline = ss.hero_via_baseline + smallFont.height();
 
-    const bool hero_has_note   = !list[0].notes.empty();
-    const int  hero_last_base  = hero_has_note ? ss.hero_note_baseline
-                                               : ss.hero_via_baseline;
+    // Reason lines from every wing part, combined into one.
+    string heroNotes;
+    for (int i = 0; i < heroCount; ++i) {
+        string n = joinNotes(list[i]);
+        if (!n.empty()) { if (!heroNotes.empty()) heroNotes += " | "; heroNotes += n; }
+    }
+    const bool hero_has_note  = !heroNotes.empty();
+    const int  hero_last_base = hero_has_note ? ss.hero_note_baseline
+                                              : ss.hero_via_baseline;
     ss.hero_top = ss.hero_baseline - bigFont.baseline();
     ss.hero_h   = (hero_last_base - smallFont.baseline() + smallFont.height())
                   - ss.hero_top;
@@ -596,11 +735,16 @@ static void buildScrollers(ScrollerState &ss,
     ss.list_y   = ss.hero_top + ss.hero_h + 3;
     ss.list_h   = height - ss.list_y - ss.ticker_h;
 
-    ss.heroDest = new ScrollingTextBox(
-        canvas, heroCols.dest_x, ss.hero_baseline - bigFont.baseline(),
-        heroCols.dest_w, bigFont.height(),
-        bigFont, destColor(list[0], ss.hero_style), list[0].dest, 20.0f, 2.0f, 12);
+    for (int i = 0; i < heroCount; ++i) {
+        int base = HERO_BASELINE + i * bigFont.height();
+        ss.heroDests.push_back(new ScrollingTextBox(
+            canvas, heroCols.dest_x, base - bigFont.baseline(),
+            heroCols.dest_w, bigFont.height(),
+            bigFont, destColor(list[i], ss.hero_style), list[i].dest,
+            20.0f, 2.0f, 12));
+    }
 
+    // via/notes describe the (shared) trunk, taken from the first part.
     ss.heroVia = new ScrollingTextBox(
         canvas, heroCols.dest_x, ss.hero_via_baseline - smallFont.baseline(),
         heroCols.dest_w, smallFont.height(),
@@ -610,13 +754,13 @@ static void buildScrollers(ScrollerState &ss,
         ss.heroNote = new ScrollingTextBox(
             canvas, heroCols.dest_x, ss.hero_note_baseline - smallFont.baseline(),
             heroCols.dest_w, smallFont.height(),
-            smallFont, ss.hero_style.note, joinNotes(list[0]), 20.0f, 2.0f, 12);
+            smallFont, ss.hero_style.note, heroNotes, 20.0f, 2.0f, 12);
     }
 
     // --- List rows: measure each departure's full height up front ---
     const int note_h = ss.row_h - NOTE_TIGHTEN;
     int total = 0;
-    for (size_t i = 1; i < list.size(); ++i) {
+    for (size_t i = heroCount; i < list.size(); ++i) {
         const int h = ss.row_h + (list[i].notes.empty() ? 0 : note_h);
         ss.row_y_offsets.push_back(total);
         ss.row_heights.push_back(h);
@@ -642,8 +786,8 @@ static void buildScrollers(ScrollerState &ss,
             35.0f, 2.0f, 40);
     }
 
-    for (size_t i = 1; i < list.size(); ++i) {
-        const size_t idx = i - 1;
+    for (size_t i = heroCount; i < list.size(); ++i) {
+        const size_t idx = i - heroCount;
         const int y_pos  = ss.row_y_offsets[idx];
         const RowStyle &st = ss.row_styles[idx];
 
@@ -671,26 +815,35 @@ static void buildScrollers(ScrollerState &ss,
 // cancellations.
 // -------------------------------------------------------------------------
 static void drawHero(Canvas *c, const Font &bigFont,
-                     const Departure &dep, const ScrollerState &ss,
+                     const vector<Departure> &list, const ScrollerState &ss,
                      const Columns &cols, int width) {
     const RowStyle &st = ss.hero_style;
     if (st.fillBg)
         drawRowBg(c, 0, ss.hero_top, width, ss.hero_h, st.bg_r, st.bg_g, st.bg_b);
 
-    drawPlatform(c, bigFont, cols.plat_x, ss.hero_baseline, dep, cols.plat_w, st);
-    DrawTextHalfSpace(c, bigFont, cols.line_x, ss.hero_baseline,
-                      st.lineTypeColor ? lineColor(dep.line) : st.fg, dep.line);
+    for (int i = 0; i < ss.hero_count; ++i) {
+        const Departure &dep = list[i];
+        int base = ss.hero_baseline + i * bigFont.height();
+        // Platform (or BUS) once, on the first part of a coupled group.
+        if (i == 0)
+            drawPlatform(c, bigFont, cols.plat_x, base, dep, cols.plat_w, st);
+        DrawTextHalfSpace(c, bigFont, cols.line_x, base,
+                          st.lineTypeColor ? lineColor(dep.line) : st.fg, dep.line);
+        ss.heroDests[i]->SetCanvas(c);
+        ss.heroDests[i]->Update();
+        int pt_w = DrawText(c, bigFont, cols.time_x, base,
+                            st.fg, nullptr, dep.pTime.c_str());
+        if (st.strikeTime)
+            drawStrikethrough(c, cols.time_x, base, pt_w, bigFont);
+        else if (!dep.cTime.empty())
+            DrawText(c, bigFont, cols.time_x + pt_w + 2, base,
+                     st.delay, nullptr, dep.cTime.c_str());
+    }
 
-    ss.heroDest->SetCanvas(c);
-    ss.heroDest->Update();
-
-    int pt_w = DrawText(c, bigFont, cols.time_x, ss.hero_baseline,
-                        st.fg, nullptr, dep.pTime.c_str());
-    if (st.strikeTime)
-        drawStrikethrough(c, cols.time_x, ss.hero_baseline, pt_w, bigFont);
-    else if (!dep.cTime.empty())
-        DrawText(c, bigFont, cols.time_x + pt_w + 2, ss.hero_baseline,
-                 st.delay, nullptr, dep.cTime.c_str());
+    // One bracket around the coupled parts.
+    if (ss.hero_count > 1 && cols.bracket_x >= 0)
+        drawWingBracket(c, cols.bracket_x, ss.hero_top,
+                        ss.hero_top + ss.hero_count * bigFont.height(), st.fg);
 
     ss.heroVia->SetCanvas(c);
     ss.heroVia->Update();
@@ -711,7 +864,15 @@ static void drawListRow(Canvas *vp, const Font &smallFont,
         drawRowBg(vp, 0, y_pos, width, ss.row_heights[idx],
                   st.bg_r, st.bg_g, st.bg_b);
 
-    drawPlatform(vp, smallFont, cols.plat_x, baseline, dep, cols.plat_w, st);
+    // Platform (or BUS) once per coupled group, on its first part.
+    if (dep.wingPos == 0)
+        drawPlatform(vp, smallFont, cols.plat_x, baseline, dep, cols.plat_w, st);
+    // Bracket spanning this group's rows, drawn from its first part.
+    if (dep.wingPos == 0 && dep.wingCount > 1 && cols.bracket_x >= 0) {
+        int last  = idx + dep.wingCount - 1;
+        drawWingBracket(vp, cols.bracket_x, ss.row_y_offsets[idx],
+                        ss.row_y_offsets[last] + ss.row_h, st.fg);
+    }
     DrawTextHalfSpace(vp, smallFont, cols.line_x, baseline,
                       st.lineTypeColor ? lineColor(dep.line) : st.fg, dep.line);
 
@@ -822,8 +983,9 @@ int main(int argc, char **argv) {
     }
 
     // --- Column layout, measured independently for the hero and the list ---
-    Columns heroCols = heroColumns(bigFont, list, width);
-    Columns listCols = listColumns(smallFont, list, width);
+    int heroCount    = heroGroupSize(list);
+    Columns heroCols = heroColumns(bigFont, list, heroCount, width);
+    Columns listCols = listColumns(smallFont, list, heroCount, width);
 
     // Layout constants
     const int header_bottom = 14;
@@ -831,7 +993,7 @@ int main(int argc, char **argv) {
     // Build initial scroller state
     ScrollerState ss;
     buildScrollers(ss, off, bigFont, smallFont, list, ticker,
-                   width, height, heroCols, listCols);
+                   width, height, heroCount, heroCols, listCols);
 
     // --- Background fetch thread (live mode only) ---
     struct SharedFetchData {
@@ -893,11 +1055,12 @@ int main(int argc, char **argv) {
                 ticker  = std::move(newTicker);
 
                 // Re-measure the columns in case platform or line names changed
-                heroCols = heroColumns(bigFont, list, width);
-                listCols = listColumns(smallFont, list, width);
+                heroCount = heroGroupSize(list);
+                heroCols  = heroColumns(bigFont, list, heroCount, width);
+                listCols  = listColumns(smallFont, list, heroCount, width);
 
                 buildScrollers(ss, off, bigFont, smallFont, list, ticker,
-                               width, height, heroCols, listCols);
+                               width, height, heroCount, heroCols, listCols);
             }
         }
 
@@ -932,8 +1095,8 @@ int main(int argc, char **argv) {
         for (int x = 0; x < width; ++x)
             c->SetPixel(x, header_bottom, 255, 255, 255);
 
-        // --- Hero block (first departure, big font) ---
-        drawHero(c, bigFont, list[0], ss, heroCols, width);
+        // --- Hero block (next departure, or both parts of a wing, big font) ---
+        drawHero(c, bigFont, list, ss, heroCols, width);
 
         // --- Following departures inside page-scrolled list ---
         ss.listVP->SetParent(c);
@@ -944,8 +1107,8 @@ int main(int argc, char **argv) {
                            60, 60, 60,
                            255, 255, 255);
 
-        for (int i = 1; i < (int)list.size(); ++i)
-            drawListRow(ss.listVP, smallFont, list[i], ss, listCols, i - 1,
+        for (int i = heroCount; i < (int)list.size(); ++i)
+            drawListRow(ss.listVP, smallFont, list[i], ss, listCols, i - heroCount,
                         width - LIST_CONTENT_X);
 
         // --- Ticker strip at bottom (only when active) ---
