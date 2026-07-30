@@ -169,7 +169,12 @@ int FetchDepartures(const DBConnectionConfig &cfg,
         ") c ON true "
         "WHERE p.eva = $1 "
         "  AND p.event_type = 'dep' "
-        "  AND p.planned_time >= (NOW() - INTERVAL '5 minutes') "
+        // Keep a departure until its *effective* time (changed time if the
+        // train is delayed, else planned) is more than 5 minutes past. Using
+        // planned_time here dropped heavily delayed trains -- e.g. one planned
+        // 20:37 but running at 21:40 vanished from the board after 20:42, an
+        // hour before it actually left. This matches the ORDER BY below.
+        "  AND COALESCE(c.changed_time, p.planned_time) >= (NOW() - INTERVAL '5 minutes') "
         "  AND (p.hidden IS NULL OR p.hidden = false) "
         "ORDER BY COALESCE(c.changed_time, p.planned_time) ASC "
         "LIMIT 50";
@@ -238,11 +243,9 @@ int FetchDepartures(const DBConnectionConfig &cfg,
         std::string cl = getField(res, r, cCLine);
         if (!cl.empty()) dep.line = cl;
 
-        // Destination: prefer planned, override with changed if present
+        // Destination: start from the planned one (or the end of the planned
+        // path when planned_destination is absent) ...
         dep.dest = getField(res, r, cPDest);
-        std::string cd = getField(res, r, cCDest);
-        if (!cd.empty()) dep.dest = cd;
-        // Fallback: last entry of planned_path
         if (dep.dest.empty()) {
             std::string path = getField(res, r, cPPath);
             if (!path.empty()) {
@@ -251,6 +254,13 @@ int FetchDepartures(const DBConnectionConfig &cfg,
                            ? path.substr(lastPipe + 1)
                            : path;
             }
+        }
+        // ... then let a changed destination replace it, flagged so the
+        // display can highlight it (shown in red).
+        std::string cd = getField(res, r, cCDest);
+        if (!cd.empty() && cd != dep.dest) {
+            dep.dest = cd;
+            dep.destChanged = true;
         }
 
         // Times

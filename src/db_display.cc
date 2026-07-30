@@ -91,7 +91,8 @@ struct Departure {
     string platform; string cPlatform; string line; string dest;
     string pTime; string cTime; string stops;
     vector<Note> notes; bool cancelled = false;
-    string category;   // "RE", "S", "ICE", "Bus", ... (empty if unknown)
+    string category;        // "RE", "S", "ICE", "Bus", ... (empty if unknown)
+    bool destChanged = false;   // destination differs from the planned one
 };
 
 // Replacement-bus services have no track, so their platform arrives empty;
@@ -119,7 +120,8 @@ static bool operator==(const Departure &a, const Departure &b) {
            a.line == b.line && a.dest == b.dest &&
            a.pTime == b.pTime && a.cTime == b.cTime &&
            a.stops == b.stops && a.cancelled == b.cancelled &&
-           a.category == b.category && a.notes == b.notes;
+           a.category == b.category && a.destChanged == b.destChanged &&
+           a.notes == b.notes;
 }
 
 // -------------------------------------------------------------------------
@@ -134,8 +136,9 @@ static Departure fromFetched(const FetchedDeparture &fd) {
     d.pTime     = fd.pTime;
     d.cTime     = fd.cTime;
     d.stops     = fd.stops;
-    d.cancelled = fd.cancelled;
-    d.category  = fd.category;
+    d.cancelled   = fd.cancelled;
+    d.category    = fd.category;
+    d.destChanged = fd.destChanged;
     for (auto &fn : fd.notes)
         d.notes.push_back({fn.id, fn.text});
     return d;
@@ -161,6 +164,7 @@ static void loadDummyData(vector<Departure> &list, string &station, string &tick
         {"3", "5", "S 11", "Düsseldorf Flughafen Terminal", "12:35", "12:37", "Düsseldorf Hbf", {{1, "Verspätung wegen technischer Störung"}}},
         {"4", "",  "RE 6", "Minden (Westf)", "12:50", "12:55", "Düsseldorf Hbf, Duisburg Hbf, Oberhausen Hbf"},
         {"5", "",  "S 8", "Wuppertal-Oberbarmen", "12:40", "12:42", "Düsseldorf Hbf, Neuss Hbf, Krefeld Hbf"},
+        {"2", "",  "RE 6", "Kassel-Wilhelmshöhe", "12:48", "13:20", "Warburg (Westf), Hofgeismar", {{1, "Umleitung"}}, false, "", true},
         {"",  "",  "Bus SEV 1", "Paderborn Hbf", "12:52", "", "Altenbeken, Bad Driburg", {{1, "Schienenersatzverkehr"}}, false, "Bus"},
         {"",  "",  "Bus 481", "Höxter Rathaus", "12:58", "13:05", "Steinheim Markt, Nieheim", {}, false, "Bus"},
     };
@@ -277,6 +281,15 @@ struct RowStyle {
     bool    lineTypeColor = true;    // colour the line name by train type
     bool    strikeTime    = false;   // strike the planned time through
 };
+
+// A rerouted train shows its (new) destination in red, the same red used for
+// delayed times. Buses and cancelled rows keep their own colours -- a
+// destination change on those is either moot (cancelled) or not meaningful
+// (replacement bus).
+static const Color CHANGE_RED(255, 60, 60);
+static Color destColor(const Departure &dep, const RowStyle &st) {
+    return (dep.destChanged && st.lineTypeColor) ? CHANGE_RED : st.fg;
+}
 
 static RowStyle styleFor(const Departure &dep) {
     RowStyle s;
@@ -586,7 +599,7 @@ static void buildScrollers(ScrollerState &ss,
     ss.heroDest = new ScrollingTextBox(
         canvas, heroCols.dest_x, ss.hero_baseline - bigFont.baseline(),
         heroCols.dest_w, bigFont.height(),
-        bigFont, ss.hero_style.fg, list[0].dest, 20.0f, 2.0f, 12);
+        bigFont, destColor(list[0], ss.hero_style), list[0].dest, 20.0f, 2.0f, 12);
 
     ss.heroVia = new ScrollingTextBox(
         canvas, heroCols.dest_x, ss.hero_via_baseline - smallFont.baseline(),
@@ -637,7 +650,7 @@ static void buildScrollers(ScrollerState &ss,
         ss.destScrollers.push_back(new ScrollingTextBox(
             ss.listVP, listCols.dest_x, y_pos + 1,
             listCols.dest_w, ss.row_h,
-            smallFont, st.fg, list[i].dest, 20.0f, 1.5f, 12));
+            smallFont, destColor(list[i], st), list[i].dest, 20.0f, 1.5f, 12));
 
         if (!list[i].notes.empty()) {
             // The reason line only has to clear the platform -- it may run

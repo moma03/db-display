@@ -28,6 +28,7 @@ struct FetchedDeparture {
     std::string stops;           // intermediate stops, comma-separated
     std::vector<FetchedNote> notes; // delay/cancellation reason text(s)
     bool cancelled = false;      // true when changed_status == 'c'
+    bool destChanged = false;    // true when changed_destination differs from planned
 };
 
 struct FetchedStationInfo {
