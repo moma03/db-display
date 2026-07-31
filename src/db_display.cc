@@ -632,7 +632,7 @@ private:
 // -------------------------------------------------------------------------
 struct ScrollerState {
     vector<ScrollingTextBox*> heroDests;   // one per wing part
-    ScrollingTextBox *heroVia        = nullptr;
+    vector<ScrollingTextBox*> heroVias;    // one per wing part (each goes its own way)
     ScrollingTextBox *heroNote       = nullptr;
     ScrollingTextBox *tickerScroller = nullptr;
     vector<ScrollingTextBox*> destScrollers;
@@ -645,7 +645,8 @@ struct ScrollerState {
     RowStyle hero_style;
     int hero_count = 1;   // wing parts drawn big up top
     int hero_top = 0, hero_h = 0;
-    int hero_baseline = 0, hero_via_baseline = 0, hero_note_baseline = 0;
+    int hero_baseline = 0, hero_note_baseline = 0;
+    int hero_part_block = 0;   // vertical stride per part (big dest row + its via)
 
     // List rows: start offset and full height (including any reason line)
     vector<int>      row_y_offsets;
@@ -661,7 +662,8 @@ struct ScrollerState {
     void destroy() {
         for (auto *s : heroDests) delete s;
         heroDests.clear();
-        delete heroVia;        heroVia        = nullptr;
+        for (auto *s : heroVias) delete s;
+        heroVias.clear();
         delete heroNote;       heroNote       = nullptr;
         delete tickerScroller; tickerScroller = nullptr;
         for (auto *s : destScrollers) delete s;
@@ -709,13 +711,16 @@ static void buildScrollers(ScrollerState &ss,
                            const Columns &heroCols, const Columns &listCols) {
     ss.destroy();
 
-    // --- Hero block: 1..heroCount wing parts as big rows, then via + notes ---
-    ss.hero_style    = styleFor(list[0]);
-    ss.hero_count    = heroCount;
-    ss.hero_baseline = HERO_BASELINE;
-    const int last_part_base = HERO_BASELINE + (heroCount - 1) * bigFont.height();
-    ss.hero_via_baseline  = last_part_base + smallFont.height();
-    ss.hero_note_baseline = ss.hero_via_baseline + smallFont.height();
+    // --- Hero block: 1..heroCount wing parts, each a big destination row
+    //     with its own "via" beneath (the parts split and take different
+    //     routes), then a single combined reason line under the group. ---
+    ss.hero_style       = styleFor(list[0]);
+    ss.hero_count       = heroCount;
+    ss.hero_baseline    = HERO_BASELINE;
+    ss.hero_part_block  = bigFont.height() + smallFont.height();  // dest + its via
+    const int last_via_base = HERO_BASELINE + (heroCount - 1) * ss.hero_part_block
+                              + smallFont.height();
+    ss.hero_note_baseline = last_via_base + smallFont.height();
 
     // Reason lines from every wing part, combined into one.
     string heroNotes;
@@ -724,8 +729,7 @@ static void buildScrollers(ScrollerState &ss,
         if (!n.empty()) { if (!heroNotes.empty()) heroNotes += " | "; heroNotes += n; }
     }
     const bool hero_has_note  = !heroNotes.empty();
-    const int  hero_last_base = hero_has_note ? ss.hero_note_baseline
-                                              : ss.hero_via_baseline;
+    const int  hero_last_base = hero_has_note ? ss.hero_note_baseline : last_via_base;
     ss.hero_top = ss.hero_baseline - bigFont.baseline();
     ss.hero_h   = (hero_last_base - smallFont.baseline() + smallFont.height())
                   - ss.hero_top;
@@ -736,19 +740,18 @@ static void buildScrollers(ScrollerState &ss,
     ss.list_h   = height - ss.list_y - ss.ticker_h;
 
     for (int i = 0; i < heroCount; ++i) {
-        int base = HERO_BASELINE + i * bigFont.height();
+        int big_base = HERO_BASELINE + i * ss.hero_part_block;
+        int via_base = big_base + smallFont.height();
         ss.heroDests.push_back(new ScrollingTextBox(
-            canvas, heroCols.dest_x, base - bigFont.baseline(),
+            canvas, heroCols.dest_x, big_base - bigFont.baseline(),
             heroCols.dest_w, bigFont.height(),
             bigFont, destColor(list[i], ss.hero_style), list[i].dest,
             20.0f, 2.0f, 12));
+        ss.heroVias.push_back(new ScrollingTextBox(
+            canvas, heroCols.dest_x, via_base - smallFont.baseline(),
+            heroCols.dest_w, smallFont.height(),
+            smallFont, ss.hero_style.via, "via " + list[i].stops, 20.0f, 2.0f, 12));
     }
-
-    // via/notes describe the (shared) trunk, taken from the first part.
-    ss.heroVia = new ScrollingTextBox(
-        canvas, heroCols.dest_x, ss.hero_via_baseline - smallFont.baseline(),
-        heroCols.dest_w, smallFont.height(),
-        smallFont, ss.hero_style.via, "via " + list[0].stops, 20.0f, 2.0f, 12);
 
     if (hero_has_note) {
         ss.heroNote = new ScrollingTextBox(
@@ -823,7 +826,7 @@ static void drawHero(Canvas *c, const Font &bigFont,
 
     for (int i = 0; i < ss.hero_count; ++i) {
         const Departure &dep = list[i];
-        int base = ss.hero_baseline + i * bigFont.height();
+        int base = ss.hero_baseline + i * ss.hero_part_block;
         // Platform (or BUS) once, on the first part of a coupled group.
         if (i == 0)
             drawPlatform(c, bigFont, cols.plat_x, base, dep, cols.plat_w, st);
@@ -838,15 +841,16 @@ static void drawHero(Canvas *c, const Font &bigFont,
         else if (!dep.cTime.empty())
             DrawText(c, bigFont, cols.time_x + pt_w + 2, base,
                      st.delay, nullptr, dep.cTime.c_str());
+        // Each part's own "via" line, directly beneath its destination.
+        ss.heroVias[i]->SetCanvas(c);
+        ss.heroVias[i]->Update();
     }
 
-    // One bracket around the coupled parts.
+    // One bracket around the coupled parts (destinations + their via lines).
     if (ss.hero_count > 1 && cols.bracket_x >= 0)
         drawWingBracket(c, cols.bracket_x, ss.hero_top,
-                        ss.hero_top + ss.hero_count * bigFont.height(), st.fg);
+                        ss.hero_top + ss.hero_count * ss.hero_part_block, st.fg);
 
-    ss.heroVia->SetCanvas(c);
-    ss.heroVia->Update();
     if (ss.heroNote) {
         ss.heroNote->SetCanvas(c);
         ss.heroNote->Update();
