@@ -20,6 +20,7 @@ static void FillOptions(const DriverConfig &cfg, RGBMatrix::Options *m,
     m->multiplexing          = cfg.multiplexing;
     m->pwm_bits              = cfg.pwm_bits;
     m->pwm_lsb_nanoseconds   = cfg.pwm_lsb_nanoseconds;
+    m->pwm_dither_bits       = cfg.pwm_dither_bits;
     m->limit_refresh_rate_hz = cfg.limit_refresh_rate_hz;
     m->show_refresh_rate     = cfg.show_refresh_rate;
     m->hardware_mapping      = cfg.hardware_mapping.c_str();
@@ -62,6 +63,7 @@ bool RgbMatrixBackend::ApplyCommandLine(int *argc, char ***argv,
     cfg->multiplexing          = m.multiplexing;
     cfg->pwm_bits              = m.pwm_bits;
     cfg->pwm_lsb_nanoseconds   = m.pwm_lsb_nanoseconds;
+    cfg->pwm_dither_bits       = m.pwm_dither_bits;
     cfg->limit_refresh_rate_hz = m.limit_refresh_rate_hz;
     cfg->show_refresh_rate     = m.show_refresh_rate;
     cfg->hardware_mapping      = m.hardware_mapping ? m.hardware_mapping : "regular";

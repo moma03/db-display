@@ -34,7 +34,9 @@ void GammaLut::Build(GammaMode mode, double exponent, int brightness_percent,
     const double full  = static_cast<double>(max_level() << shift_);
 
     for (int c = 0; c < 256; ++c) {
-        double y;  // normalised luminance in [0,1]
+        // Initialised so a future GammaMode that forgets a case here degrades
+        // to black rather than to whatever was on the stack.
+        double y = 0.0;  // normalised luminance in [0,1]
         switch (mode) {
         case GammaMode::kCie1931: {
             // Same curve rpi-rgb-led-matrix uses, evaluated in double and kept

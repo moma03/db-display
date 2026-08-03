@@ -6,6 +6,9 @@
 
 #include <json.hpp>
 
+#include "dither.h"      // kBayerCount
+#include "frame_shm.h"   // kMinSlots / kMaxSlots
+
 using json = nlohmann::json;
 
 namespace led {
@@ -62,6 +65,7 @@ bool LoadDriverConfig(const std::string &path, DriverConfig *cfg, std::string *e
             Get(m, "multiplexing", &cfg->multiplexing, &seen);
             Get(m, "pwm_bits", &cfg->pwm_bits, &seen);
             Get(m, "pwm_lsb_nanoseconds", &cfg->pwm_lsb_nanoseconds, &seen);
+            Get(m, "pwm_dither_bits", &cfg->pwm_dither_bits, &seen);
             Get(m, "gpio_slowdown", &cfg->gpio_slowdown, &seen);
             Get(m, "brightness", &cfg->brightness, &seen);
             Get(m, "limit_refresh_rate_hz", &cfg->limit_refresh_rate_hz, &seen);
@@ -139,6 +143,10 @@ bool LoadDriverConfig(const std::string &path, DriverConfig *cfg, std::string *e
         *err = "dither.swap_every_n_vsync must be >= 1";
         return false;
     }
+    if (cfg->pwm_dither_bits < 0 || cfg->pwm_dither_bits > 2) {
+        *err = "matrix.pwm_dither_bits must be 0..2";
+        return false;
+    }
     if (cfg->brightness < 1 || cfg->brightness > 100) {
         *err = "brightness must be 1..100";
         return false;
@@ -155,7 +163,8 @@ std::string DescribeDriverConfig(const DriverConfig &cfg) {
       << "  rows=" << cfg.rows << " cols=" << cfg.cols
       << " chain=" << cfg.chain_length << " parallel=" << cfg.parallel << "\n"
       << "pwm      " << cfg.pwm_bits << " bits, lsb=" << cfg.pwm_lsb_nanoseconds
-      << "ns, slowdown=" << cfg.gpio_slowdown
+      << "ns, pwm_dither_bits=" << cfg.pwm_dither_bits
+      << ", slowdown=" << cfg.gpio_slowdown
       << ", limit=" << cfg.limit_refresh_rate_hz << "Hz\n"
       << "gamma    " << GammaModeName(cfg.gamma_mode)
       << " (exp=" << cfg.gamma_exponent << "), brightness " << cfg.brightness

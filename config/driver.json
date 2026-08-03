@@ -23,6 +23,12 @@
     "multiplexing": 0,
     "pwm_bits": 4,
     "pwm_lsb_nanoseconds": 130,
+    // Shifts the library's bitplane timing table down by this many stops,
+    // halving every plane's duration per step -- roughly doubling the
+    // achievable refresh rate at the cost of light output. This is NOT the
+    // temporal dithering below, and at pwm_bits=4 it is what takes the panel
+    // from ~125 Hz to the 190 Hz cap. Measured: 0 -> 125.7 Hz, 1 -> 189.9 Hz.
+    "pwm_dither_bits": 1,
     "gpio_slowdown": 2,
     "limit_refresh_rate_hz": 190,
     // Leave OFF in production. The library printf()s the rate from inside its
@@ -31,10 +37,6 @@
     "show_refresh_rate": false,
     "hardware_mapping": "regular",
     "led_rgb_sequence": "RGB"
-    // NOTE: pwm_dither_bits is deliberately absent. It only takes effect when
-    // pwm_bits >= 10 (start_bit = max(pwm_low_bit, 11 - pwm_bits)), so at 4
-    // bits it is a no-op. It is also not the same thing as the temporal
-    // dithering below -- it drops low bit planes to raise refresh rate.
   },
 
   "gamma": {

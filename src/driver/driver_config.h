@@ -23,6 +23,13 @@ struct DriverConfig {
     int  multiplexing          = 0;
     int  pwm_bits              = 4;
     int  pwm_lsb_nanoseconds   = 130;
+    // NOT the same thing as the temporal dithering below, and NOT a no-op at
+    // low pwm_bits. It shifts the library's whole bitplane timing table down
+    // by this many stops (framebuffer.cc: `if (b >= dither_bits) timing *= 2`),
+    // halving every plane duration per step. That roughly doubles the
+    // achievable refresh rate per stop, at the cost of total light output.
+    // 1 is what the current panel runs and what gets it from ~125Hz to 190Hz.
+    int  pwm_dither_bits       = 1;
     int  gpio_slowdown         = 2;
     int  brightness            = 100;   // applied in our gamma LUT, not by the library
     int  limit_refresh_rate_hz = 190;
