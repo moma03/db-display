@@ -1,0 +1,74 @@
+// driver.json -- read once at startup. Restart the driver to change anything.
+//
+// rpi-rgb-led-matrix's own --led-* flags override the "matrix" block on top of
+// this, so the LED_Panel_Controller hub keeps working the way it does today.
+// The driver reads the EFFECTIVE values back after flag parsing, so a hub
+// launching with --led-pwm-bits=5 also retargets the gamma LUT and dither.
+//
+// Defaults below are the current hardware: Pi 3B+, Electrodragon active-3
+// adapter, 2 chains of 2x 128x64 panels = 256x128.
+{
+  "shm": {
+    "path": "/led-frames",
+    // Three, not two: the driver quantises straight out of the mapped slot
+    // without copying, so a slot stays live for a whole pass. See frame_shm.h.
+    "slot_count": 3
+  },
+
+  "matrix": {
+    "rows": 64,
+    "cols": 128,
+    "chain_length": 2,
+    "parallel": 2,
+    "multiplexing": 0,
+    "pwm_bits": 4,
+    "pwm_lsb_nanoseconds": 130,
+    "gpio_slowdown": 2,
+    "limit_refresh_rate_hz": 190,
+    // Leave OFF in production. The library printf()s the rate from inside its
+    // SCHED_FIFO 99 GPIO thread on every single refresh -- that is the stdio
+    // lock ~190 times a second on the one thread that must not be delayed.
+    "show_refresh_rate": false,
+    "hardware_mapping": "regular",
+    "led_rgb_sequence": "RGB"
+    // NOTE: pwm_dither_bits is deliberately absent. It only takes effect when
+    // pwm_bits >= 10 (start_bit = max(pwm_low_bit, 11 - pwm_bits)), so at 4
+    // bits it is a no-op. It is also not the same thing as the temporal
+    // dithering below -- it drops low bit planes to raise refresh rate.
+  },
+
+  "gamma": {
+    // Applied HERE, in the driver. The library's own CIE1931 correction is
+    // switched off so the curve is applied exactly once. See src/common/gamma.h.
+    "mode": "cie1931",          // cie1931 | power | linear
+    "exponent": 2.2,            // only used by "power"
+    "brightness_percent": 100   // folded into the LUT, before quantisation
+  },
+
+  "dither": {
+    // At pwm_bits=4 the panel has 16 levels and input bytes 0..78 would
+    // otherwise all render as pure black. This is the A/B switch.
+    "enabled": true,
+    "phases": 4,             // must divide 16: 1, 2, 4, 8 or 16
+    // Frames per dither step, as a fraction of the panel refresh rate. 1 means
+    // a full quantise pass every refresh (~190/s) which is the best quality
+    // and the highest CPU cost; raise it if the driver cannot keep up.
+    "swap_every_n_vsync": 1
+  },
+
+  "realtime": {
+    "sched_fifo_priority": 80,
+    // -1 = do not pin. This is deliberate: the library already pins its own
+    // GPIO thread to core 3 at SCHED_FIFO 99, and with isolcpus=3 we are
+    // already kept off it. Setting this to 3 puts the quantise pass in
+    // competition with the bit-banger. The driver warns if you do.
+    "cpu_affinity": -1,
+    "lock_memory": true,
+    "drop_privileges": true
+  },
+
+  "diagnostics": {
+    // Seconds between swap-rate reports on a low-priority thread. 0 = off.
+    "stats_interval_s": 0
+  }
+}

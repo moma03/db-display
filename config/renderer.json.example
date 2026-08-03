@@ -1,0 +1,35 @@
+// renderer.json -- read once at startup. Restart the renderer to change it.
+// (Layout lives in layout.json and IS hot-reloadable.)
+//
+// Copy to renderer.json and fill in the database credentials. renderer.json is
+// gitignored so credentials do not end up in the repository.
+{
+  "shm": {
+    // Must match driver.json. The DRIVER creates this segment, because it is
+    // the one that knows the authoritative panel geometry; the renderer waits
+    // for it and adapts.
+    "path": "/led-frames"
+  },
+
+  // Where the layout lives. Relative paths resolve against THIS file, so the
+  // renderer works from any working directory (systemd gives it /).
+  "layout": "layout.json",
+
+  // Nothing on this board moves faster than ~40 px/s, so 30 is imperceptible
+  // from 60 and leaves the CPU alone. The driver re-quantises at the panel
+  // refresh rate regardless, so this is not the dither rate.
+  "target_fps": 30,
+
+  // Seconds to wait for the driver's shared-memory segment before giving up.
+  "wait_for_shm_s": 30,
+
+  "database": {
+    "host": "10.0.10.132",
+    "port": 5442,
+    "dbname": "timetable_stops_db",
+    "user": "CHANGE_ME",
+    "password": "CHANGE_ME",
+    "eva": 8000297,
+    "refresh_seconds": 30
+  }
+}

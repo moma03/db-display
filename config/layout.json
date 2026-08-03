@@ -1,0 +1,133 @@
+// layout.json -- HOT RELOADABLE.
+//
+// Save this file and the renderer picks it up within ~300 ms. No restart, no
+// recompile. A file that fails to parse or validate is rejected and the
+// running layout keeps going, so a half-finished edit cannot blank the panel;
+// the reason lands in the renderer's log.
+//
+// Coordinates are pixels, origin top-left. Colours are "#RRGGBB". Every rect
+// is validated against the canvas at load time.
+//
+// What is NOT here, deliberately: wing grouping, replacement-bus detection and
+// the delay-code table. Those are behaviour, not layout, and live in C++.
+{
+  "canvas": {
+    "width": 256,
+    "height": 128,
+    "background": "#000078"
+  },
+
+  // Paths are relative to this file unless they start with "/".
+  "fonts": {
+    "big":   "../third_party/rpi-rgb-led-matrix-extensions/third_party/rpi-rgb-led-matrix/fonts/clR6x12.bdf",
+    "small": "../third_party/rpi-rgb-led-matrix-extensions/third_party/rpi-rgb-led-matrix/fonts/5x8.bdf"
+  },
+
+  // Line-name colouring. Longest matching prefix wins; a single-letter prefix
+  // only matches when followed by a space or a digit, so "S" does not swallow
+  // "SEV". "default" is the fallback.
+  "line_colors": {
+    "S":       "#FFFF00",
+    "ICE":     "#FFFFFF",
+    "default": "#FF3C3C"
+  },
+
+  "widgets": [
+    {
+      "type": "station_name",
+      "id":   "header-station",
+      "rect": [5, 0, 175, 14],
+      "font": "big",
+      "color": "#FFFFFF",
+      "source": "station"
+    },
+    {
+      "type": "clock",
+      "id":   "header-clock",
+      "rect": [180, 0, 76, 14],
+      "font": "big",
+      "color": "#FFFFFF",
+      "format": "%H:%M:%S",
+      "align": "right"
+    },
+    {
+      "type": "separator",
+      "id":   "header-rule",
+      "rect": [0, 14, 256, 1],
+      "color": "#FFFFFF",
+      "thickness": 1
+    },
+    {
+      "type": "hero",
+      "id":   "next-departure",
+      "rect": [5, 15, 251, 52],
+      "source": "departures",
+      "font": "small",
+      "font_big": "big",
+      // Baseline of the first big row, relative to this rect's top.
+      "baseline": 12,
+      "colors": {
+        "fg":           "#FFFFFF",
+        "via":          "#B4B4B4",
+        "note":         "#FFB400",
+        "delay":        "#FF3C3C",
+        "dest_changed": "#FF3C3C",
+        "bus_fg":       "#FFFF00",
+        "bus_bg":       "#5A0082",
+        "bus_sub":      "#BE9600",
+        "bus_delay":    "#FF785A",
+        "cancelled_bg": "#FFFFFF"
+      },
+      // "scroll" drives the via/note lines, "dest_scroll" the destination.
+      "scroll":      { "speed_px_s": 20.0, "wait_s": 2.0, "gap_px": 12 },
+      "dest_scroll": { "speed_px_s": 20.0, "wait_s": 2.0, "gap_px": 12 }
+    },
+    {
+      "type": "departure_list",
+      "id":   "following-departures",
+      // The rect fixes left, width and BOTTOM (y + h = 118). The TOP follows
+      // the hero, because the hero's height depends on the data: a two-part
+      // wing group with a delay reason is more than twice as tall as a solo
+      // departure. Remove "flow_after" to pin the top to rect.y instead.
+      "rect": [0, 56, 256, 62],
+      "flow_after": "next-departure",
+      "flow_gap": 3,
+      "source": "departures",
+      "font": "small",
+      "row_gap": 2,
+      // Pulls a row's reason line up toward the departure it belongs to. 2px is
+      // all the slack there is: the 5x8 glyphs reach 7px above the baseline
+      // (ÄÖÜ) and 1px below it (,.Qgjpqy).
+      "note_tighten": 2,
+      "colors": {
+        "fg":           "#FFFFFF",
+        "via":          "#B4B4B4",
+        "note":         "#FFB400",
+        "delay":        "#FF3C3C",
+        "dest_changed": "#FF3C3C",
+        "bus_fg":       "#FFFF00",
+        "bus_bg":       "#5A0082",
+        "bus_sub":      "#BE9600",
+        "bus_delay":    "#FF785A",
+        "cancelled_bg": "#FFFFFF"
+      },
+      "scroll":      { "speed_px_s": 40.0, "wait_s": 3.0, "gap_px": 12 },
+      "dest_scroll": { "speed_px_s": 20.0, "wait_s": 1.5, "gap_px": 12 },
+      "scrollbar": {
+        "x": 1, "w": 2,
+        "track": "#3C3C3C",
+        "thumb": "#FFFFFF"
+      }
+    },
+    {
+      "type": "ticker",
+      "id":   "disruption-ticker",
+      "rect": [0, 118, 256, 10],
+      "source": "ticker",
+      "font": "small",
+      "color": "#C80000",
+      "colors": { "background": "#FFFFFF" },
+      "scroll": { "speed_px_s": 35.0, "wait_s": 2.0, "gap_px": 40 }
+    }
+  ]
+}
