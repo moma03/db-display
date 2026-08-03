@@ -455,6 +455,26 @@ Temporal dithering is **free in refresh terms** — 190.0 Hz at the 1st
 percentile, matching the pre-split binary — and costs about 38 percentage
 points of CPU on a non-isolated core.
 
+### Dither alternation rate
+
+With the panel at 190 Hz the driver reports **~95 swaps/s**, not 190. The
+quantise pass costs roughly 6 ms for 32768 pixels (~180 ns/pixel), which is
+longer than one 5.26 ms refresh period, so `SwapOnVSync` lands on every second
+vsync. The panel refresh itself is unaffected — that stayed at 190.0 Hz — but
+the dither alternates at ~95 Hz and a full 4-phase cycle completes in ~42 ms.
+
+That is comfortably above flicker fusion and was not visible in testing, and it
+is the reason the dither is spatial as well as temporal: with a 4×4 Bayer
+matrix the *instantaneous* spatial average is already close to correct, so the
+temporal component only refines it. A purely temporal alternation at 95 Hz
+would be far more marginal.
+
+If a slow shimmer ever does show on large flat areas, `dither.phases: 2` halves
+the cycle time. The deeper fix is the per-pixel `SetPixel` path, which does a
+read-modify-write across four bit planes at a 2 KB stride; precomputing one
+`FrameCanvas` per dither phase and cycling them would make the hot path a
+pointer swap, at the cost of one canvas (~720 KB) per phase.
+
 The `min` column is the interrupt stalls described above, and is not something
 this codebase can fix; the pre-split binary showed the same excursions (worst
 case 50.5 Hz over ~1.4 M samples).
@@ -499,6 +519,7 @@ ls -l /dev/shm/led-frames
 | everything below mid-grey is black | expected at `pwm_bits=4` with dithering off — that is the 0..78 clamp |
 | `realtime sched=FAILED` at startup | missing `CAP_SYS_NICE` / `LimitRTPRIO` in the unit |
 | layout edits do nothing | check the renderer log — a rejected reload says why and keeps the old layout |
+| swap rate is half the refresh rate | expected: the quantise pass is longer than one refresh period, see [Dither alternation rate](#dither-alternation-rate) |
 
 To validate the driver with no renderer, no database and no network at all, use
 `led_shmgen` (see [Run](#run)). If the panel looks wrong with `shmgen` running,
