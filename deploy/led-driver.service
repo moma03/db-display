@@ -1,0 +1,62 @@
+# led-driver.service
+#
+# The timing-critical half. Owns the panel, creates the shared-memory segment,
+# and must keep running whether or not the renderer is healthy.
+#
+# Install:
+#   sudo cp deploy/led-driver.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now led-driver
+#
+# Adjust WorkingDirectory/ExecStart to wherever the repo is checked out.
+
+[Unit]
+Description=LED panel driver (shared memory -> HUB75 GPIO)
+Documentation=file:///opt/led-display/README.md
+# Deliberately no dependency on the renderer. The driver is the thing that must
+# never go down; a missing renderer just means the last frame stays on screen.
+After=local-fs.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/led-display
+ExecStart=/opt/led-display/build/led_driver --config /opt/led-display/config/driver.json
+
+# rpi-rgb-led-matrix needs root to map the GPIO/DMA registers. It drops to
+# drop_priv_user/group itself once the hardware is up (realtime.drop_privileges
+# in driver.json). The shm segment is created 0644 before the drop, so the
+# dropped user can still read it.
+User=root
+
+# --- real-time ---
+# The driver sets SCHED_FIFO and mlockall on itself BEFORE the matrix library
+# drops privileges (see src/driver/rt_setup.h). Both need capabilities that
+# would otherwise be gone by then:
+#   CAP_SYS_NICE  -> sched_setscheduler(SCHED_FIFO)
+#   CAP_IPC_LOCK  -> mlockall(MCL_CURRENT|MCL_FUTURE)
+# Without these the driver still runs, but logs "sched=FAILED" at startup and
+# is a normal-priority process.
+AmbientCapabilities=CAP_SYS_NICE CAP_IPC_LOCK
+LimitRTPRIO=99
+LimitMEMLOCK=infinity
+
+# --- restart behaviour ---
+# Always, not on-failure: a driver that exits for any reason leaves the panel
+# frozen on its last frame, which looks like working hardware showing stale
+# data. That is worse than a visible restart.
+Restart=always
+RestartSec=2
+
+# The segment is named POSIX shm (/dev/shm/led-frames). PrivateTmp would give
+# the driver its own /dev/shm and the renderer could never see it.
+PrivateTmp=no
+
+# Keep the journal clean: show_refresh_rate must stay off in production anyway
+# (the library printf()s from its RT thread on every refresh), but this stops a
+# stray debug run from filling the SD card.
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=200
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,58 @@
+# led-renderer.service
+#
+# The content half. Fetches data, draws frames, publishes them to shared
+# memory. Unprivileged, restartable, and completely invisible to the panel
+# while it is down -- the driver keeps showing the last good frame.
+#
+# Install:
+#   sudo cp deploy/led-renderer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now led-renderer
+
+[Unit]
+Description=LED panel renderer (departure board -> shared memory)
+Documentation=file:///opt/led-display/README.md
+# Ordering only, not a hard dependency: the driver creates the segment, so
+# starting after it avoids a pointless wait. If the driver is late the renderer
+# retries for wait_for_shm_s anyway.
+After=network-online.target led-driver.service
+Wants=network-online.target
+# Deliberately NOT BindsTo/Requires led-driver: restarting the renderer must
+# never restart the driver.
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/led-display
+ExecStart=/opt/led-display/build/led_renderer --config /opt/led-display/config/renderer.json
+
+# No GPIO, no /dev/mem, no root. It only needs to read the layout and fonts and
+# write into the shm segment the driver created 0644.
+User=daemon
+Group=daemon
+
+# --- hardening: safe because this process touches nothing privileged ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+# Must be able to write the shm segment.
+PrivateTmp=no
+ReadWritePaths=/dev/shm
+
+# Nice it down. The renderer is allowed to be slow; what matters is that it
+# never competes with anything the driver depends on.
+Nice=10
+
+Restart=always
+RestartSec=5
+# Do not hammer a database that is down.
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
