@@ -32,6 +32,7 @@ and when no new frame arrives it keeps showing the last good one.
 - [Where gamma lives](#where-gamma-lives)
 - [Temporal dithering](#temporal-dithering)
 - [Config schema](#config-schema)
+- [Running under the hub](#running-under-the-hub)
 - [Host setup](#host-setup)
 - [Measured behaviour](#measured-behaviour)
 - [Debugging](#debugging)
@@ -332,6 +333,64 @@ layout file rather than hidden in the drawing code.
 **What is deliberately not in the layout file:** wing grouping, replacement-bus
 detection, cancellation styling and the delay-code table. Those are behaviour,
 not layout, and live in C++.
+
+---
+
+## Running under the hub
+
+`start.sh` makes the driver/renderer pair look like a single program, so
+LED_Panel_Controller can launch it like any other. Add to the hub's
+`config/config.yaml`:
+
+```yaml
+  trainboard:
+    name: Train Departure Board
+    command: /home/pi/led-refactor/start.sh --eva {subprogram} {matrix_options}
+    subprograms:
+      "8005708": { name: Steinheim (Westf) }
+      "8000297": { name: Paderborn Hbf }
+      "8002549": { name: Hamburg Hbf }
+```
+
+`{matrix_options}` renders to rpi-rgb-led-matrix's own `--led-*` flags
+(`MatrixConfig.as_cli_args`), which `start.sh` routes to the driver; `--eva`
+goes to the renderer. Everything else it does not recognise is logged and
+ignored rather than being fatal — a display program that refuses to start is
+worse than one that ignores an argument.
+
+Three properties of the hub shape the script
+(`led_controller/process_manager.py`), and each is a way to get this wrong:
+
+- **`Popen(shlex.split(cmd), cwd=_REPO_ROOT)`** — no shell, and the cwd is the
+  *controller's* repo root, not this one. Every path in `start.sh` resolves
+  against its own location.
+- **`terminate()` signals the direct child only**, then `SIGKILL`s the direct
+  child after `process_terminate_timeout` (5 s). Nothing kills the process
+  group. So `start.sh` forwards `SIGTERM` to both children itself and reaps
+  them in ~3.3 s worst case. Without that, the `SIGKILL` lands on the wrapper
+  and leaves the driver orphaned holding `/dev/mem` and the GPIO — which breaks
+  whatever the hub launches next.
+- **`poll()` watches the exit code**, so `start.sh` exits as soon as either
+  child does, propagating that child's code.
+
+Verified against stubs, without touching the panel:
+
+| case | result |
+|---|---|
+| hub-style launch, foreign cwd | args routed correctly, both children start |
+| `SIGTERM` to the wrapper only | both children reaped, exit 0, shm cleaned |
+| child ignores `SIGTERM` | `SIGKILL` fallback, done in 3.3 s (hub allows 5) |
+| driver crashes at runtime | wrapper exits 3, renderer cleaned up |
+| driver fails at startup | exits 1 in 150 ms, no hang |
+
+> **Set `show_refresh_rate: false` in the hub's `matrix:` block.** It is
+> currently `true`, so `{matrix_options}` renders `--led-show-refresh` and the
+> library `printf()`s from its RT thread on every refresh. The driver warns
+> when it sees this.
+
+For live departures, `config/renderer.json` must exist with the database
+credentials; without it `start.sh` falls back to `renderer.json.example` in
+demo mode rather than failing to start.
 
 ---
 
