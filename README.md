@@ -295,9 +295,49 @@ reason to prefer YAML for hand-edited config.
 
 ### `config/renderer.json` — startup only
 
-Copy from `renderer.json.example`. Holds `shm.path`, `layout` (relative paths
-resolve against the config file), `target_fps`, and the `database` block.
-Gitignored, because it holds credentials.
+Non-secret settings: `shm.path`, `layout` (relative paths resolve against the
+config file), `target_fps`, `wait_for_shm_s`, and `database.eva` /
+`database.refresh_seconds`.
+
+**No credentials.** If this file contains `database.host`, `.port`, `.dbname`,
+`.user` or `.password`, the renderer refuses to start and tells you which
+`DB_PG_*` key to move it to. A secret is only as protected as the file it sits
+in, and nothing treats a `config.json` as sensitive.
+
+### `config/.env` — credentials
+
+```sh
+cp config/.env.example config/.env
+chmod 600 config/.env
+```
+
+```sh
+DB_PG_HOST=10.0.10.132
+DB_PG_PORT=5442
+DB_PG_DBNAME=timetable_stops_db
+DB_PG_USER=...
+DB_PG_PASSWORD="quote it if it contains a space or #"
+```
+
+Key names match `timetable-fetcher/.env`, so one file can serve both. A `.env`
+is gitignored by default almost everywhere, backup and deploy tooling treats it
+as sensitive, and anyone who sees one knows to protect it — none of which is
+true of a random config file.
+
+Searched in order, unless `env_file` (in renderer.json) or `--env` names one:
+
+1. `$LED_ENV_FILE`
+2. `<dir of renderer.json>/.env`
+3. `<dir of renderer.json>/../.env` (repo root)
+
+A missing file is not an error — the values may come from the real environment
+instead, e.g. systemd's `EnvironmentFile=`. **Real environment variables win
+over the file**, so `DB_PG_HOST=... ./led_renderer` works for a one-off. An
+`env_file` that is named explicitly but absent *is* an error.
+
+Values may be bare, `'single'` (literal) or `"double"` quoted (with `\n`, `\t`,
+`\"`, `\\`). An unquoted value ends at a ` #` comment, so quote anything
+containing `#`. The password is never logged.
 
 ### `config/layout.json` — **hot reloadable**
 
@@ -388,9 +428,10 @@ Verified against stubs, without touching the panel:
 > library `printf()`s from its RT thread on every refresh. The driver warns
 > when it sees this.
 
-For live departures, `config/renderer.json` must exist with the database
-credentials; without it `start.sh` falls back to `renderer.json.example` in
-demo mode rather than failing to start.
+For live departures, `config/renderer.json` and `config/.env` must both exist;
+without the former `start.sh` falls back to `renderer.json.example` in demo
+mode rather than failing to start, and without DB credentials the renderer
+warns and keeps going.
 
 ---
 

@@ -304,6 +304,18 @@ CppRenderBackend::Columns CppRenderBackend::ComputeColumns(
 void CppRenderBackend::BuildScrollers() {
     DestroyScrollers();
 
+    // Invariant: there is always at least one departure to lay out. Enforced
+    // here rather than trusting callers, because the drawing code indexes
+    // list[0] unconditionally (the hero is always present).
+    //
+    // SetData() already guarantees this, but in live mode SetData() is not
+    // called until the first database fetch returns -- so the first frame after
+    // startup used to render against an empty vector and segfault. Demo mode
+    // seeds data before the loop starts, which is exactly why this only ever
+    // showed up against a real database.
+    if (data_.departures.empty())
+        data_.departures.push_back(NoDeparturesPlaceholder());
+
     const Widget &hw = *w_hero_;
     const Widget &lw = *w_list_;
     const std::vector<Departure> &list = data_.departures;

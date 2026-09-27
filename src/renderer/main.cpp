@@ -234,9 +234,18 @@ int main(int argc, char **argv) {
         DBConnectionConfig db;
         db.host = cfg.db_host; db.port = cfg.db_port; db.dbname = cfg.db_name;
         db.user = cfg.db_user; db.password = cfg.db_password; db.eva = cfg.eva;
-        std::fprintf(stderr, "renderer: live mode, %s:%s/%s eva=%d every %ds\n",
+        // Never log db.password.
+        std::fprintf(stderr, "renderer: live mode, %s@%s:%s/%s eva=%d every %ds "
+                             "(credentials from %s)\n",
+                     db.user.empty() ? "<no user>" : db.user.c_str(),
                      db.host.c_str(), db.port.c_str(), db.dbname.c_str(),
-                     db.eva, cfg.refresh_seconds);
+                     db.eva, cfg.refresh_seconds,
+                     cfg.env_file_used.empty() ? "the environment"
+                                               : cfg.env_file_used.c_str());
+        if (db.user.empty())
+            std::fprintf(stderr,
+                "renderer: WARNING no DB_PG_USER set -- copy config/.env.example "
+                "to config/.env and fill it in, or pass --demo.\n");
 
         fetch = std::thread([&shared, db, &cfg] {
             while (!g_stop.load(std::memory_order_relaxed)) {

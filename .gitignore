@@ -5,3 +5,8 @@ config/*.local.json
 config.json
 .DS_Store
 compile_commands.json
+
+# Credentials. Never commit.
+.env
+*.env
+!*.env.example

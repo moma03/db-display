@@ -15,7 +15,13 @@ struct RendererConfig {
     // authoritative panel geometry.
     int wait_for_shm_s = 30;
 
+    // Where credentials come from. Empty = search the default locations (see
+    // LoadRendererConfig). Credentials are NOT read from renderer.json.
+    std::string env_file;
+    std::string env_file_used;   // what was actually loaded, for the log
+
     // --- data source ---
+    // Filled from the .env / process environment, never from renderer.json.
     std::string db_host   = "localhost";
     std::string db_port   = "5442";
     std::string db_name   = "stationsdb";
