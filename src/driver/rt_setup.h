@@ -32,11 +32,19 @@
 
 namespace led {
 
+// Below this much RLIMIT_MEMLOCK, MCL_FUTURE is refused: locking every future
+// allocation against a small cap turns an ordinary `new` into an uncaught
+// std::bad_alloc. 64 MiB leaves ample room for the matrix library's buffers on
+// the largest panel this is likely to drive.
+inline constexpr unsigned long kMinMemlockForFuture = 64ul * 1024 * 1024;
+
 struct RtReport {
     bool scheduler_ok = false;
     bool affinity_ok  = false;
     bool memlock_ok   = false;
-    std::vector<std::string> notes;   // warnings and remediation hints
+    bool memlock_future = false;        // false => only current pages locked
+    unsigned long memlock_limit = 0;    // RLIMIT_MEMLOCK after our attempt to raise it
+    std::vector<std::string> notes;     // warnings and remediation hints
 };
 
 // Apply real-time settings to the calling thread. Never fatal on its own: a
