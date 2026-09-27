@@ -363,12 +363,42 @@ each type adds its own keys (`format`/`align` for the clock, `colors`/`scroll`/
 `scrollbar` for the list, and so on). All rects are validated against the
 canvas at load time.
 
-**`flow_after`.** The hero is genuinely variable height — a two-part wing group
-with a delay reason is more than twice as tall as a solo departure — so a
-widget below it cannot have a fixed top. `"flow_after": "next-departure"` makes
-a widget's **top** follow that widget's rendered bottom, while its rect still
-fixes left, width and **bottom**. That keeps the dependency declared in the
-layout file rather than hidden in the drawing code.
+**Vertical auto-flow.** Two widgets are variable height, so a layout that
+reserved worst-case space for both would waste most of the panel most of the
+time:
+
+| | minimum | maximum |
+|---|---|---|
+| hero | 18 px (solo departure) | 46 px (two-part wing group + reason line) |
+| ticker | 0 px (no disruption message) | 10 px |
+
+So the widget between them can have neither a fixed top nor a fixed bottom:
+
+- **`flow_after: "<id>"`** — this widget's **top** follows that widget's actual
+  rendered bottom.
+- **`flow_before: "<id>"`** — this widget's **bottom** follows that widget's
+  top, or reaches the bottom of the canvas when that widget is not currently
+  shown, so its space is reclaimed rather than left blank.
+
+With both set, `rect` supplies only x and width. That is the honest reading:
+the vertical extent genuinely depends on the data, and the layout file says so
+instead of the drawing code deciding silently. Remove either flow to pin that
+edge to the rect.
+
+The renderer logs the resolved geometry whenever it changes, so a layout can be
+checked without counting pixels:
+
+```
+layout resolved -- hero y18..64 (46 px, 2 parts), list y67..118 (51 px), ticker shown
+layout resolved -- hero y18..36 (18 px, 1 part), list y39..128 (89 px), ticker hidden (space reclaimed)
+```
+
+`--demo-minimal` renders the layout's minimum content (one solo departure, no
+ticker), which is the case that proves optional widgets give their space back:
+
+```bash
+./build/led_renderer --layout config/layout.json --demo-minimal --once /tmp/min.ppm
+```
 
 **What is deliberately not in the layout file:** wing grouping, replacement-bus
 detection, cancellation styling and the delay-code table. Those are behaviour,

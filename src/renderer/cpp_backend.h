@@ -62,6 +62,8 @@ private:
         int time_x = 0, dest_w = 0, note_w = 0, plat_w = 0;
     };
 
+    bool IsWidgetVisible(const Widget &w) const;
+    int  WidgetBottom(const Widget &w) const;
     bool LoadFonts(const LayoutConfig &lc, std::string *err);
     void DestroyScrollers();
     void BuildScrollers();
@@ -111,6 +113,10 @@ private:
     std::vector<RowStyle> row_styles_;
     int content_h_ = 0, row_h_ = 0, list_y_ = 0, list_h_ = 0, ticker_h_ = 0;
     int list_content_x_ = 4;
+    // Last-logged geometry, so the resolved-layout line is printed on
+    // change rather than on every data refresh.
+    int logged_list_y_ = -1, logged_list_h_ = -1;
+    int logged_hero_h_ = -1, logged_ticker_h_ = -1;
 };
 
 }  // namespace led

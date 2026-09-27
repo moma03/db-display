@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <sstream>
+#include <utility>
 
 #include <json.hpp>
 
@@ -186,6 +187,9 @@ bool LoadLayoutConfig(const std::string &path, LayoutConfig *out, std::string *e
             if (wj.contains("baseline"))  w.baseline  = wj["baseline"].get<int>();
             if (wj.contains("flow_after")) w.flow_after = wj["flow_after"].get<std::string>();
             if (wj.contains("flow_gap"))   w.flow_gap   = wj["flow_gap"].get<int>();
+            if (wj.contains("flow_before")) w.flow_before = wj["flow_before"].get<std::string>();
+            if (wj.contains("flow_gap_before"))
+                w.flow_gap_before = wj["flow_gap_before"].get<int>();
             if (wj.contains("row_gap"))      w.row_gap      = wj["row_gap"].get<int>();
             if (wj.contains("note_tighten")) w.note_tighten = wj["note_tighten"].get<int>();
 
@@ -248,15 +252,19 @@ bool LoadLayoutConfig(const std::string &path, LayoutConfig *out, std::string *e
     if (cfg.widgets.empty()) { *err = "\"widgets\" is empty"; return false; }
 
     for (const Widget &w : cfg.widgets) {
-        if (w.flow_after.empty()) continue;
-        if (!cfg.FindById(w.flow_after)) {
-            *err = "widget '" + w.id + "' has flow_after '" + w.flow_after +
-                   "', which is not the id of any widget";
-            return false;
-        }
-        if (w.flow_after == w.id) {
-            *err = "widget '" + w.id + "' has flow_after pointing at itself";
-            return false;
+        for (auto [field, target] : {std::make_pair("flow_after", w.flow_after),
+                                     std::make_pair("flow_before", w.flow_before)}) {
+            if (target.empty()) continue;
+            if (!cfg.FindById(target)) {
+                *err = "widget '" + w.id + "' has " + field + " '" + target +
+                       "', which is not the id of any widget";
+                return false;
+            }
+            if (target == w.id) {
+                *err = "widget '" + w.id + "' has " + std::string(field) +
+                       " pointing at itself";
+                return false;
+            }
         }
     }
 

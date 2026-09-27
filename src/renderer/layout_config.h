@@ -86,15 +86,28 @@ struct Widget {
     // separator
     int  thickness = 1;
 
-    // Vertical auto-flow. The hero is genuinely variable height -- a two-part
-    // wing group with a delay reason is more than twice as tall as a solo
-    // departure -- so a widget below it cannot have a fixed top. Setting
-    // `flow_after` to another widget's id makes this widget's TOP follow that
-    // widget's actual rendered bottom, while its rect still fixes its left,
-    // width and BOTTOM. That keeps the relationship declared in the layout
-    // file rather than hidden in the drawing code.
+    // Vertical auto-flow. Two widgets here are variable height, and a layout
+    // that reserves worst-case space for both wastes most of the panel most of
+    // the time:
+    //
+    //   * the hero is 19 px for a solo departure and 47 px for a two-part wing
+    //     group carrying a delay reason;
+    //   * the ticker only exists while there is a disruption message.
+    //
+    // So a widget between them can have neither a fixed top nor a fixed
+    // bottom. `flow_after` makes the TOP follow the named widget's actual
+    // rendered bottom; `flow_before` makes the BOTTOM follow the named
+    // widget's top -- or, when that widget is not currently shown, extend to
+    // the bottom of the canvas so its space is reclaimed rather than left
+    // blank.
+    //
+    // With both set, `rect` supplies only x and width. That is the honest
+    // reading: the vertical extent genuinely depends on the data, and the
+    // layout file says so rather than the drawing code deciding silently.
     std::string flow_after;
     int         flow_gap = 3;
+    std::string flow_before;
+    int         flow_gap_before = 0;
 };
 
 struct LayoutConfig {

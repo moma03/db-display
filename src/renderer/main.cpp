@@ -42,6 +42,9 @@ void Usage(const char *a0) {
         "  --config PATH   renderer config JSON (default config/renderer.json)\n"
         "  --layout PATH   override the layout path from the config\n"
         "  --demo          use built-in sample data, no database needed\n"
+        "  --demo-minimal  sample data with ONE solo departure and no ticker,\n"
+        "                  i.e. the layout's minimum content -- use with --once\n"
+        "                  to check that optional widgets give their space back\n"
         "  --eva N         override the station EVA number\n"
         "  --once OUT.ppm  render a single frame to a PPM file and exit\n"
         "                  (no shared memory, no panel -- works anywhere)\n",
@@ -107,6 +110,28 @@ led::FrameData DemoData() {
     return d;
 }
 
+// The layout's minimum content: one solo departure (no wing partner, no delay
+// reason) and no disruption message. Everything optional is absent, so this is
+// what proves the optional widgets actually give their space back instead of
+// leaving it blank.
+led::FrameData DemoDataMinimal() {
+    led::FrameData d;
+    d.station = "Steinheim (Westf.)";
+    d.ticker.clear();
+    led::Departure x;
+    x.platform = "1"; x.line = "RE 11"; x.dest = "Dortmund Hbf";
+    x.pTime = "12:38"; x.stops = "Kamen, Unna";
+    d.departures.push_back(x);
+    for (int i = 0; i < 8; ++i) {
+        led::Departure y = x;
+        y.platform = std::to_string(2 + (i % 5));
+        y.dest = "Zielbahnhof " + std::to_string(i + 1);
+        y.pTime = "13:0" + std::to_string(i);
+        d.departures.push_back(y);
+    }
+    return d;
+}
+
 bool WritePpm(const char *path, const uint8_t *rgb, int w, int h) {
     FILE *f = fopen(path, "wb");
     if (!f) return false;
@@ -124,7 +149,7 @@ int main(int argc, char **argv) {
 
     std::string config_path = "config/renderer.json";
     std::string layout_override, once_path;
-    bool demo = false;
+    bool demo = false, demo_minimal = false;
     int eva_override = 0;
 
     for (int i = 1; i < argc; ++i) {
@@ -134,6 +159,7 @@ int main(int argc, char **argv) {
         else if (a == "--once"   && i + 1 < argc) once_path = argv[++i];
         else if (a == "--eva"    && i + 1 < argc) eva_override = std::atoi(argv[++i]);
         else if (a == "--demo") demo = true;
+        else if (a == "--demo-minimal") { demo = true; demo_minimal = true; }
         else if (a == "--help" || a == "-h") { Usage(argv[0]); return 0; }
         else { std::fprintf(stderr, "unknown argument '%s'\n", a.c_str()); Usage(argv[0]); return 1; }
     }
@@ -167,7 +193,7 @@ int main(int argc, char **argv) {
             return 1;
         }
         std::vector<uint8_t> buf(static_cast<size_t>(layout->width) * layout->height * 3);
-        backend.SetData(DemoData());
+        backend.SetData(demo_minimal ? DemoDataMinimal() : DemoData());
         backend.RenderFrame(buf.data(), 0);
         if (!WritePpm(once_path.c_str(), buf.data(), layout->width, layout->height)) {
             std::fprintf(stderr, "renderer: cannot write %s\n", once_path.c_str());
@@ -223,7 +249,7 @@ int main(int argc, char **argv) {
     std::thread fetch;
     if (demo) {
         std::fprintf(stderr, "renderer: demo mode, no database\n");
-        backend.SetData(DemoData());
+        backend.SetData(demo_minimal ? DemoDataMinimal() : DemoData());
     } else {
 #if !HAVE_LIBPQ
         std::fprintf(stderr,

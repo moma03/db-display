@@ -157,6 +157,23 @@ private:
 
 // ---------------------------------------------------------------------------
 
+// Whether a widget currently contributes anything to the screen. Only the
+// ticker is conditional today: it exists solely to carry a disruption message,
+// so with no message there is nothing to draw and its strip belongs to
+// whatever flows against it.
+bool CppRenderBackend::IsWidgetVisible(const Widget &w) const {
+    if (w.type == WidgetType::kTicker) return !data_.ticker.empty();
+    return true;
+}
+
+// Bottom edge of a widget as actually rendered. The hero is the one whose
+// height depends on the data; everything else is its rect.
+int CppRenderBackend::WidgetBottom(const Widget &w) const {
+    if (&w == w_hero_) return hero_top_ + hero_h_;
+    if (!IsWidgetVisible(w)) return w.rect.y;
+    return w.rect.y + w.rect.h;
+}
+
 CppRenderBackend::~CppRenderBackend() { DestroyScrollers(); }
 
 void CppRenderBackend::DestroyScrollers() {
@@ -372,26 +389,43 @@ void CppRenderBackend::BuildScrollers() {
     // is the one that can outgrow its rect. That is reported rather than
     // silently pushing everything below it down the screen.
     row_h_    = smallFont.height() + lw.row_gap;
-    ticker_h_ = (data_.ticker.empty() || !w_ticker_) ? 0 : w_ticker_->rect.h;
+    ticker_h_ = (w_ticker_ && IsWidgetVisible(*w_ticker_)) ? w_ticker_->rect.h : 0;
 
-    // Geometry comes from the layout file. The rect fixes left, width and
-    // BOTTOM; the top either comes from the rect too, or -- when the file says
-    // `flow_after` -- follows the actual rendered bottom of the named widget.
+    // Geometry is computed from what is actually on screen, not from reserved
+    // worst-case boxes. Both neighbours of the list are variable:
     //
-    // The hero is the one genuinely variable-height element: a two-part wing
-    // group with a delay reason is more than twice as tall as a solo
-    // departure. flow_after is how the layout file expresses that dependency,
-    // instead of it being an unwritten rule inside this function.
-    const int list_bottom = lw.rect.y + lw.rect.h;
+    //   hero    19 px solo, 47 px for a two-part wing group with a reason line
+    //   ticker  present only while there is a disruption message
+    //
+    // Pinning the list between fixed rects would leave the difference blank --
+    // up to 28 px under a solo hero, plus the ticker's 10 px whenever there is
+    // no message. The layout file declares the dependency (flow_after /
+    // flow_before) and the actual pixels are resolved here.
+    const int canvas_bottom = layout_->height;
+
+    // --- top: follow the hero's real rendered bottom ---------------------
     if (!lw.flow_after.empty()) {
         const Widget *anchor = layout_->FindById(lw.flow_after);
-        int anchor_bottom = lw.rect.y;
-        if (anchor == w_hero_) anchor_bottom = hero_top_ + hero_h_;
-        else if (anchor)       anchor_bottom = anchor->rect.y + anchor->rect.h;
-        list_y_ = std::max(lw.rect.y, anchor_bottom + lw.flow_gap);
+        if (anchor == w_hero_)  list_y_ = hero_top_ + hero_h_ + lw.flow_gap;
+        else if (anchor)        list_y_ = WidgetBottom(*anchor) + lw.flow_gap;
+        else                    list_y_ = lw.rect.y;
     } else {
         list_y_ = lw.rect.y;
     }
+
+    // --- bottom: follow the ticker, or reclaim its strip when hidden -----
+    int list_bottom;
+    if (!lw.flow_before.empty()) {
+        const Widget *anchor = layout_->FindById(lw.flow_before);
+        // A hidden anchor contributes nothing, so the list takes the space.
+        list_bottom = (anchor && IsWidgetVisible(*anchor))
+                        ? anchor->rect.y - lw.flow_gap_before
+                        : canvas_bottom;
+    } else {
+        list_bottom = lw.rect.y + lw.rect.h;
+    }
+    if (list_bottom > canvas_bottom) list_bottom = canvas_bottom;
+
     list_h_ = list_bottom - list_y_;
 
     if (list_h_ < row_h_) {
@@ -440,6 +474,22 @@ void CppRenderBackend::BuildScrollers() {
         total += h;
     }
     content_h_ = total;
+
+    // Resolved geometry, so a layout can be checked without counting pixels.
+    // Only logged when it actually changes -- scrollers are rebuilt on every
+    // data refresh and this would otherwise be one line per refresh.
+    if (list_y_ != logged_list_y_ || list_h_ != logged_list_h_ ||
+        hero_h_ != logged_hero_h_ || ticker_h_ != logged_ticker_h_) {
+        std::fprintf(stderr,
+            "renderer: layout resolved -- hero y%d..%d (%d px, %d part%s), "
+            "list y%d..%d (%d px), ticker %s\n",
+            hero_top_, hero_top_ + hero_h_, hero_h_, hero_count_,
+            hero_count_ == 1 ? "" : "s",
+            list_y_, list_y_ + list_h_, list_h_,
+            ticker_h_ ? "shown" : "hidden (space reclaimed)");
+        logged_list_y_ = list_y_;  logged_list_h_ = list_h_;
+        logged_hero_h_ = hero_h_;  logged_ticker_h_ = ticker_h_;
+    }
 
     listVP_ = new ViewPort(canvas_.get(), list_content_x_, list_y_,
                            width_ - list_content_x_, list_h_);

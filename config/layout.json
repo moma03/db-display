@@ -85,13 +85,18 @@
     {
       "type": "departure_list",
       "id":   "following-departures",
-      // The rect fixes left, width and BOTTOM (y + h = 118). The TOP follows
-      // the hero, because the hero's height depends on the data: a two-part
-      // wing group with a delay reason is more than twice as tall as a solo
-      // departure. Remove "flow_after" to pin the top to rect.y instead.
+      // With both flows set, "rect" supplies only x and width -- the vertical
+      // extent genuinely depends on the data:
+      //   TOP    follows the hero's real bottom (19 px for a solo departure,
+      //          47 px for a two-part wing group carrying a reason line)
+      //   BOTTOM follows the ticker's top, or reaches the canvas bottom when
+      //          there is no disruption message and the ticker is not drawn
+      // Remove either flow to pin that edge to the rect instead.
       "rect": [0, 56, 256, 62],
       "flow_after": "next-departure",
       "flow_gap": 3,
+      "flow_before": "disruption-ticker",
+      "flow_gap_before": 0,
       "source": "departures",
       "font": "small",
       "row_gap": 2,
