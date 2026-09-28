@@ -609,6 +609,45 @@ The `min` column is the interrupt stalls described above, and is not something
 this codebase can fix; the pre-split binary showed the same excursions (worst
 case 50.5 Hz over ~1.4 M samples).
 
+### Picking `limit_refresh_rate_hz` (tuned against the real panel)
+
+Brightness is `(on-time per frame) x (frames per second)`, and the limiter only
+stops flicker while it is actually *engaging* — i.e. while it is padding most
+frames to a constant period. If the cap is set near or above what the hardware
+can sustain, nothing gets padded, the frame period wanders, and that reads as
+**brightness pulsing** rather than as a rate change.
+
+The rule that came out of tuning this panel (2 chains x 2 panels, `slowdown=2`),
+judged visually at each step:
+
+> **cap ~= 0.79 x the UNCAPPED median**
+
+| pwm / dither | uncapped | cap | ratio | result |
+|---|---|---|---|---|
+| 5 / 1 | 216 Hz | **170** | 0.79 | rock solid |
+| 4 / 1 | 239 Hz | 190 | 0.79 | stable (old default) |
+| 6 / 2 | 295 Hz | 220 | 0.75 | stable, but dim |
+| 6 / 1 | 197 Hz | 180 | 0.91 | **pulses** |
+| 6 / 2 | 295 Hz | 280 | 0.95 | **flickers** |
+
+Measure the uncapped median with `--led-limit-refresh=0` and `--led-show-refresh`.
+
+At the chosen setting the rate is **median 170.0, p1 170.0, min 169.9** — the
+headroom is wide enough that even interrupt-stalled frames still fit inside the
+period, so the limiter absorbs all the jitter. Every other configuration tested
+had a minimum between 56 and 89 Hz.
+
+Two findings worth keeping:
+
+- **`slowdown=1` ghosts on this hardware.** It raises the ceiling (347 Hz at
+  pwm 6 / dither 2) but produces visible ghosting around high-contrast text.
+  `slowdown=2` is the floor for these chains.
+- **Temporal dithering costs ~16% of the refresh rate**, which is enough to push
+  a config from the stable side of the ratio to the pulsing side. At
+  `pwm_bits=5` the black clamp is 53 rather than 78, so it has little left to
+  recover and is off by default. It earns its cost at `pwm_bits=4`, where it
+  also fixes the scrollbar-track artefact described in the config.
+
 ### Old vs new, measured
 
 Hannover Hbf (EVA 8000152), 50 s per run, identical matrix flags

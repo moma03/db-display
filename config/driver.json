@@ -21,16 +21,31 @@
     "chain_length": 2,
     "parallel": 2,
     "multiplexing": 0,
-    "pwm_bits": 4,
+    "pwm_bits": 5,
     "pwm_lsb_nanoseconds": 130,
     // Shifts the library's bitplane timing table down by this many stops,
-    // halving every plane's duration per step -- roughly doubling the
-    // achievable refresh rate at the cost of light output. This is NOT the
-    // temporal dithering below, and at pwm_bits=4 it is what takes the panel
-    // from ~125 Hz to the 190 Hz cap. Measured: 0 -> 125.7 Hz, 1 -> 189.9 Hz.
+    // halving every plane's duration per step. NOT the temporal dithering
+    // below. Raising it buys refresh rate but costs brightness, because
+    // brightness = (on-time per frame) x (frames per second) and this halves
+    // the first term. Measured at pwm_bits=4: 0 -> 125.7 Hz, 1 -> 239 Hz.
     "pwm_dither_bits": 1,
     "gpio_slowdown": 2,
-    "limit_refresh_rate_hz": 190,
+    // MUST be about 0.79x the UNCAPPED median, or the limiter stops engaging
+    // and the frame period wanders -- which is seen as brightness pulsing, not
+    // as a rate change. Measured on this panel (2 chains x 2 panels,
+    // slowdown=2), tuned against the real display:
+    //
+    //   pwm=5 dither=1  uncapped 216 Hz  ->  cap 170  ratio 0.79  ROCK SOLID
+    //   pwm=4 dither=1  uncapped 239 Hz  ->  cap 190  ratio 0.79  stable
+    //   pwm=6 dither=2  uncapped 295 Hz  ->  cap 220  ratio 0.75  stable
+    //   pwm=6 dither=1  uncapped 197 Hz  ->  cap 180  ratio 0.91  PULSES
+    //   pwm=6 dither=2  uncapped 295 Hz  ->  cap 280  ratio 0.95  FLICKERS
+    //
+    // At this setting the measured rate is median 170.0, p1 170.0, min 169.9 --
+    // the headroom is wide enough that even interrupt-stalled frames still fit
+    // inside the period, so the limiter absorbs all of the jitter. Every other
+    // configuration tested had a min between 56 and 89 Hz.
+    "limit_refresh_rate_hz": 170,
     // Leave OFF in production. The library printf()s the rate from inside its
     // SCHED_FIFO 99 GPIO thread on every single refresh -- that is the stdio
     // lock ~190 times a second on the one thread that must not be delayed.
@@ -48,9 +63,21 @@
   },
 
   "dither": {
-    // At pwm_bits=4 the panel has 16 levels and input bytes 0..78 would
-    // otherwise all render as pure black. This is the A/B switch.
-    "enabled": true,
+    // OFF at this setting, deliberately. Two reasons, both measured:
+    //
+    //  1. At pwm_bits=5 the black clamp is 53 rather than 78, so far less is
+    //     lost to truncation and the dither has much less to recover.
+    //  2. The per-vsync quantise pass costs ~16% of the refresh rate, which
+    //     would drop the uncapped median from 216 to ~182 and push the cap
+    //     ratio from 0.79 to 0.93 -- straight into the pulsing regime above.
+    //
+    // It also caused a visible artefact here: the scrollbar track (#3C3C3C =
+    // grey 60) sits below the pwm_bits=4 clamp, so it could only be shown by
+    // alternating level 0/1, which read as flicker on that flat area. At
+    // pwm_bits=5 grey 60 is a real level and the problem disappears.
+    //
+    // Turn it back on if you drop to pwm_bits=4, where it earns its cost.
+    "enabled": false,
     "phases": 4,             // must divide 16: 1, 2, 4, 8 or 16
     // Frames per dither step, as a fraction of the panel refresh rate. 1 means
     // a full quantise pass every refresh (~190/s) which is the best quality
