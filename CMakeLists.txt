@@ -108,6 +108,7 @@ endif()
 set(RENDERER_SRC
   src/renderer/main.cpp
   src/renderer/renderer_config.cpp
+  src/renderer/dotenv.cpp
   src/renderer/layout_config.cpp
   src/renderer/layout_watcher.cpp
   src/renderer/cpp_backend.cpp

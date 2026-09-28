@@ -25,6 +25,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -58,7 +60,7 @@ void Usage(const char *argv0) {
 
 }  // namespace
 
-int main(int argc, char **argv) {
+static int RunDriver(int argc, char **argv) {
     using namespace led;
 
     std::string config_path = "config/driver.json";
@@ -132,10 +134,13 @@ int main(int argc, char **argv) {
                                       cfg.lock_memory, kLibraryCore);
     for (const std::string &n : rt.notes)
         std::fprintf(stderr, "driver: %s\n", n.c_str());
-    std::fprintf(stderr, "driver: realtime sched=%s affinity=%s mlock=%s\n",
+    std::fprintf(stderr, "driver: realtime sched=%s affinity=%s mlock=%s (%s, limit %s)\n",
                  rt.scheduler_ok ? "ok" : "FAILED",
                  rt.affinity_ok ? "ok" : "FAILED",
-                 rt.memlock_ok ? "ok" : "FAILED");
+                 rt.memlock_ok ? "ok" : "FAILED",
+                 rt.memlock_future ? "current+future" : "current only",
+                 rt.memlock_limit == ~0ul ? "unlimited"
+                     : (std::to_string(rt.memlock_limit / 1024) + " KiB").c_str());
 
     // --- 4. matrix (drops privileges inside) -------------------------------
     if (!backend.Init(cfg, &err)) {
@@ -207,4 +212,26 @@ int main(int argc, char **argv) {
     backend.Shutdown();
     shm.Close();
     return 0;
+}
+
+// A resource failure -- most often std::bad_alloc when RLIMIT_MEMLOCK is small
+// and MCL_FUTURE is in force -- used to surface as a bare `terminate called
+// after throwing an instance of 'std::bad_alloc'` and SIGABRT, which reaches
+// the hub as exit code 134 with nothing to act on. Catch it here so the
+// failure names itself and exits cleanly.
+int main(int argc, char **argv) {
+    try {
+        return RunDriver(argc, argv);
+    } catch (const std::bad_alloc &) {
+        std::fprintf(stderr,
+            "driver: FATAL out of memory during startup.\n"
+            "        If RLIMIT_MEMLOCK is small (systemd defaults to 8 MiB) and\n"
+            "        memory locking is on, every allocation is charged against\n"
+            "        it. Add LimitMEMLOCK=infinity to the unit, or set\n"
+            "        realtime.lock_memory=false in driver.json.\n");
+        return 1;
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "driver: FATAL %s\n", e.what());
+        return 1;
+    }
 }
