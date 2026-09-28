@@ -609,6 +609,52 @@ The `min` column is the interrupt stalls described above, and is not something
 this codebase can fix; the pre-split binary showed the same excursions (worst
 case 50.5 Hz over ~1.4 M samples).
 
+### Old vs new, measured
+
+Hannover Hbf (EVA 8000152), 50 s per run, identical matrix flags
+(`pwm_bits=4 pwm_dither_bits=1 gpio_slowdown=2 limit=190`). "Stutters" counts
+refreshes below 180 Hz out of ~10,640.
+
+| | median | p1 | stutters | CPU |
+|---|---|---|---|---|
+| old, single process | 190.0 Hz | 190.0 | 11–13 | **106%** |
+| new, dither off | 190.0 Hz | 190.0 | 5–22 | **117%** |
+| new, dither on | 190.0 Hz | 190.0 | 21 | **157%** |
+
+**There is no performance gain.** Refresh rate is identical — all three sit on
+the 190 Hz limiter at both median and 1st percentile. The stutter counts
+overlap across repetitions (the new system measured 22, then 7, then 5), so
+that column is noise: those excursions come from interrupt load on the isolated
+core, which neither architecture touches (see "What you cannot fix on a Pi 3B+"
+above).
+
+The split *costs* about 11 percentage points of CPU, and temporal dithering a
+further ~40. That is the honest trade, and it is the expected one: the driver
+now reads a frame from shared memory and quantises it, where the old code drew
+straight into the canvas. It is strictly more work.
+
+Worth noting separately: the **renderer costs only ~6% of one core** — the
+entire dashboard, including the database fetch, layout and all the scrolling
+text, for a large station. Essentially all the CPU is the driver's per-pixel
+quantise pass.
+
+So what the rewrite buys is not speed:
+
+- **Temporal dithering** — picture quality, not throughput. It recovers input
+  bytes 0..78, which 4-bit PWM otherwise crushes to black: 31% of the range.
+  This is the only change visible on the panel, and it is what the extra 40
+  points of CPU pay for. Turn it off with `dither.enabled` and the split's
+  overhead is the remaining ~11 points.
+- **Crash isolation** — not theoretical. A renderer segfault (there was one,
+  on the first live frame before any data had arrived) blanks the old display;
+  here the driver keeps showing the last good frame and the renderer restarts
+  under it.
+- **The seams** — declarative hot-reloadable layout, a swappable render
+  backend, and the Art-Net output interface.
+
+If none of those matter to a given deployment, the old single process was
+cheaper and just as smooth.
+
 ### A note on what the split did and did not fix
 
 The split was motivated by flicker attributed to the renderer stalling the GPIO
