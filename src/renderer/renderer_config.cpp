@@ -53,6 +53,10 @@ bool LoadRendererConfig(const std::string &path, RendererConfig *cfg, std::strin
             if (d.contains("eva")) cfg->eva = d["eva"].get<int>();
             if (d.contains("refresh_seconds"))
                 cfg->refresh_seconds = d["refresh_seconds"].get<int>();
+            if (d.contains("heartbeat_seconds"))
+                cfg->heartbeat_seconds = d["heartbeat_seconds"].get<int>();
+            if (d.contains("display_id"))
+                cfg->display_id = d["display_id"].get<std::string>();
             for (const char *k : {"host", "port", "dbname", "user", "password"})
                 if (d.contains(k))
                     return (*err = std::string("database.") + k +
@@ -65,6 +69,13 @@ bool LoadRendererConfig(const std::string &path, RendererConfig *cfg, std::strin
                                        return u;
                                    }() + " and delete it here.",
                             false);
+        }
+        if (j.contains("departures")) {
+            const json &d = j["departures"];
+            if (d.contains("grace_seconds"))
+                cfg->departure_grace_seconds = d["grace_seconds"].get<int>();
+            if (d.contains("max_defer_seconds"))
+                cfg->max_defer_seconds = d["max_defer_seconds"].get<int>();
         }
         if (j.contains("env_file")) cfg->env_file = j["env_file"].get<std::string>();
 
@@ -121,6 +132,9 @@ bool LoadRendererConfig(const std::string &path, RendererConfig *cfg, std::strin
         return false;
     }
     if (cfg->refresh_seconds < 1) { *err = "database.refresh_seconds must be >= 1"; return false; }
+    if (cfg->heartbeat_seconds < 1) { *err = "database.heartbeat_seconds must be >= 1"; return false; }
+    if (cfg->departure_grace_seconds < 0) { *err = "departures.grace_seconds must be >= 0"; return false; }
+    if (cfg->max_defer_seconds < 0) { *err = "departures.max_defer_seconds must be >= 0"; return false; }
     return true;
 }
 

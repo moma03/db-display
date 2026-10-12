@@ -111,11 +111,16 @@ public:
         } else if (dt >= wait_) {
             const int next = NextStart(visible);
             last_ = now;
-            if (next < 0) cur_ = target_ = 0.0f;
+            if (next < 0) { cur_ = target_ = 0.0f; ++wraps_; }
             else { target_ = static_cast<float>(next); scrolling_ = true; }
         }
         Apply();
     }
+
+    // Times the list has jumped from its last page back to the top. That jump
+    // is the one moment a rebuild (which also resets to the top) goes unseen.
+    unsigned wraps() const { return wraps_; }
+    bool scrolls() const { return content_h_ > vp_->visibleHeight(); }
 
     float scrollFraction() const {
         const int max_off = std::max(0, content_h_ - vp_->visibleHeight());
@@ -152,6 +157,7 @@ private:
     float wait_, speed_;
     float cur_ = 0.0f, target_ = 0.0f;
     bool scrolling_ = false;
+    unsigned wraps_ = 0;
     std::chrono::steady_clock::time_point last_;
 };
 
@@ -247,13 +253,61 @@ bool CppRenderBackend::Reload(std::shared_ptr<const LayoutConfig> layout, std::s
 }
 
 void CppRenderBackend::SetData(const FrameData &d) {
-    // Rebuilding the scrollers resets every scroll position, so only do it when
-    // the refresh actually changed something.
-    if (!data_dirty_ && d == data_) return;
-    data_ = d;
-    if (data_.departures.empty()) data_.departures.push_back(NoDeparturesPlaceholder());
-    GroupWings(data_.departures);
+    // Only recorded here. RenderFrame() decides whether and when it reaches
+    // the screen, because that is where the scroll position is known.
+    if (d == incoming_) return;
+    incoming_ = d;
+    incoming_dirty_ = true;
+}
+
+// Turn incoming_ into what the board should show now, and decide whether to
+// show it at once. Rebuilding the scrollers resets every scroll position, so
+// a change is shown immediately only when the hero changed (the board is read
+// by it) or there is no scroll position to lose; anything further down waits
+// for the list to page back to the top.
+void CppRenderBackend::Reconcile(int64_t now) {
+    incoming_dirty_ = false;
+    const size_t before = incoming_.departures.size();
+    PruneDeparted(incoming_.departures, now, grace_s_);
+    if (incoming_.departures.size() != before)
+        std::fprintf(stderr, "renderer: %zu departed train(s) removed\n",
+                     before - incoming_.departures.size());
+    next_expiry_ = NextExpiry(incoming_.departures, grace_s_);
+
+    FrameData next = incoming_;
+    if (next.departures.empty()) next.departures.push_back(NoDeparturesPlaceholder());
+    GroupWings(next.departures);
+
+    if (next == data_) { has_pending_ = false; return; }
+    if (has_pending_ && next == pending_) return;
+
+    const bool immediate = data_dirty_ || !pageScroll_ || !pageScroll_->scrolls() ||
+                           HeroChanged(next.departures, data_.departures);
+    if (immediate) {
+        data_ = std::move(next);
+        data_dirty_ = true;
+        has_pending_ = false;
+        return;
+    }
+    // Keep the first deferral's clock, so a stream of small changes cannot
+    // postpone the update forever.
+    if (!has_pending_) {
+        pending_since_ = std::chrono::steady_clock::now();
+        pending_wraps_ = pageScroll_->wraps();
+    }
+    pending_ = std::move(next);
+    has_pending_ = true;
+}
+
+void CppRenderBackend::PromotePendingIfDue() {
+    if (!has_pending_) return;
+    const bool due = data_dirty_ ||   // rebuilding anyway (layout reload)
+                     !pageScroll_ || pageScroll_->wraps() != pending_wraps_ ||
+                     std::chrono::steady_clock::now() - pending_since_ >= max_defer_;
+    if (!due) return;
+    data_ = std::move(pending_);
     data_dirty_ = true;
+    has_pending_ = false;
 }
 
 CppRenderBackend::RowStyle CppRenderBackend::StyleFor(const Departure &dep,
@@ -687,6 +741,11 @@ void CppRenderBackend::DrawListRow(Canvas *vp, const Departure &dep, int idx, in
 void CppRenderBackend::RenderFrame(uint8_t *rgb, int64_t /*t_ns*/) {
     canvas_->Retarget(rgb);
 
+    // Departures expire on the wall clock, not on the fetch cycle. The list is
+    // sorted by effective time, so the hero is always the first to go.
+    const int64_t now = static_cast<int64_t>(std::time(nullptr));
+    if (incoming_dirty_ || now >= next_expiry_) Reconcile(now);
+    PromotePendingIfDue();
     if (data_dirty_) { BuildScrollers(); data_dirty_ = false; }
 
     Canvas *c = canvas_.get();

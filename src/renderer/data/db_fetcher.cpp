@@ -6,6 +6,7 @@
 #include "db_fetcher.h"
 #include "delay_codes.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -112,6 +113,20 @@ int FetchDepartures(const DBConnectionConfig &cfg,
         return -1;
     }
 
+    const int n = FetchDeparturesOn(conn, cfg, station_out, out, ticker_out);
+    PQfinish(conn);
+    return n;
+}
+
+int FetchDeparturesOn(PGconn *conn,
+                      const DBConnectionConfig &cfg,
+                      FetchedStationInfo &station_out,
+                      std::vector<FetchedDeparture> &out,
+                      std::string &ticker_out)
+{
+    out.clear();
+    ticker_out.clear();
+
     // --- 1. Fetch station name ---
     {
         std::string q = "SELECT name FROM stations WHERE eva = " + std::to_string(cfg.eva) + " LIMIT 1";
@@ -150,7 +165,11 @@ int FetchDepartures(const DBConnectionConfig &cfg,
         "  c.changed_status, "
         "  c.changed_line, "
         "  c.changed_destination, "
-        "  c.messages "
+        "  c.messages, "
+        // Times are stored as naive Berlin local time; AT TIME ZONE makes them
+        // absolute before taking the epoch, or DST would shift them by 1-2 h.
+        "  EXTRACT(EPOCH FROM (COALESCE(c.changed_time, p.planned_time) "
+        "                      AT TIME ZONE 'Europe/Berlin'))::bigint AS depart_epoch "
         "FROM planned_events p "
         "LEFT JOIN LATERAL ( "
         "  SELECT ce.changed_time, ce.changed_platform, ce.changed_status, "
@@ -171,21 +190,23 @@ int FetchDepartures(const DBConnectionConfig &cfg,
         "WHERE p.eva = $1 "
         "  AND p.event_type = 'dep' "
         // Keep a departure until its *effective* time (changed time if the
-        // train is delayed, else planned) is more than 5 minutes past. Using
-        // planned_time here dropped heavily delayed trains -- e.g. one planned
-        // 20:37 but running at 21:40 vanished from the board after 20:42, an
-        // hour before it actually left. This matches the ORDER BY below.
-        "  AND COALESCE(c.changed_time, p.planned_time) >= (NOW() - INTERVAL '5 minutes') "
+        // train is delayed, else planned) is more than the grace period past.
+        // Using planned_time here dropped heavily delayed trains -- e.g. one
+        // planned 20:37 but running at 21:40 vanished from the board after
+        // 20:42, an hour before it actually left. This matches the ORDER BY
+        // below, and PruneDeparted() applies the same rule between fetches.
+        "  AND COALESCE(c.changed_time, p.planned_time) >= (NOW() - $2::int * INTERVAL '1 second') "
         "  AND (p.hidden IS NULL OR p.hidden = false) "
         "ORDER BY COALESCE(c.changed_time, p.planned_time) ASC "
         "LIMIT 50";
 
     // We need a stable pointer for paramValues
     std::string evaParam = std::to_string(cfg.eva);
-    const char *paramValues[1] = { evaParam.c_str() };
+    std::string graceParam = std::to_string(cfg.grace_seconds);
+    const char *paramValues[2] = { evaParam.c_str(), graceParam.c_str() };
 
     PGresult *res = PQexecParams(conn, departureQuery,
-                                  1,          // nParams
+                                  2,          // nParams
                                   nullptr,    // paramTypes (let PG infer)
                                   paramValues,
                                   nullptr,    // paramLengths
@@ -195,7 +216,6 @@ int FetchDepartures(const DBConnectionConfig &cfg,
     if (PQresultStatus(res) != PGRES_TUPLES_OK) {
         std::cerr << "Departure query failed: " << PQresultErrorMessage(res) << std::endl;
         PQclear(res);
-        PQfinish(conn);
         return -1;
     }
 
@@ -217,6 +237,7 @@ int FetchDepartures(const DBConnectionConfig &cfg,
     int cCLine    = PQfnumber(res, "changed_line");
     int cCDest    = PQfnumber(res, "changed_destination");
     int cMsgs     = PQfnumber(res, "messages");
+    int cEpoch    = PQfnumber(res, "depart_epoch");
 
     for (int r = 0; r < nRows; ++r) {
         FetchedDeparture dep;
@@ -279,6 +300,9 @@ int FetchDepartures(const DBConnectionConfig &cfg,
             if (ct != dep.pTime)
                 dep.cTime = ct;
         }
+
+        std::string epoch = getField(res, r, cEpoch);
+        if (!epoch.empty()) dep.departAt = std::atoll(epoch.c_str());
 
         // Intermediate stops from planned path
         std::string path = getField(res, r, cPPath);
@@ -377,6 +401,5 @@ int FetchDepartures(const DBConnectionConfig &cfg,
         PQclear(msgRes);
     }
 
-    PQfinish(conn);
     return (int)out.size();
 }

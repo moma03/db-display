@@ -27,6 +27,7 @@ struct FetchedDeparture {
     std::string dest;            // final destination station name
     std::string pTime;           // planned time "HH:MM"
     std::string cTime;           // changed/actual time "HH:MM" (empty if on time)
+    long long   departAt = 0;    // unix seconds of the effective (changed, else planned) time
     std::string stops;           // intermediate stops, comma-separated
     std::vector<FetchedNote> notes; // delay/cancellation reason text(s)
     bool cancelled = false;      // true when changed_status == 'c'
@@ -49,6 +50,7 @@ struct DBConnectionConfig {
     std::string user     = "";
     std::string password = "";
     int         eva      = 8000297;   // default station EVA
+    int         grace_seconds = 60;   // keep a departure this long past its effective time
 };
 
 // Load DB connection config from a JSON file.
@@ -67,5 +69,15 @@ int FetchDepartures(const DBConnectionConfig &cfg,
                     FetchedStationInfo &station_out,
                     std::vector<FetchedDeparture> &out,
                     std::string &ticker_out);
+
+// Same queries on an already open connection, which is left open. The
+// session must use timezone Europe/Berlin (times are stored as naive local
+// time). Used by the live session in db_live.h.
+typedef struct pg_conn PGconn;
+int FetchDeparturesOn(PGconn *conn,
+                      const DBConnectionConfig &cfg,
+                      FetchedStationInfo &station_out,
+                      std::vector<FetchedDeparture> &out,
+                      std::string &ticker_out);
 
 #endif // DB_FETCHER_H

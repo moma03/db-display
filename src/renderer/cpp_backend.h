@@ -8,6 +8,9 @@
 
 #include <graphics.h>
 
+#include <chrono>
+#include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -43,6 +46,14 @@ public:
     void SetData(const FrameData &data) override;
     void RenderFrame(uint8_t *rgb, int64_t t_ns) override;
 
+    // How long a departure stays past its effective time, and how long a
+    // change that spares the hero may wait for the list to page back to the
+    // top before it is shown anyway.
+    void SetExpiry(int grace_s, int max_defer_s) {
+        grace_s_ = grace_s;
+        max_defer_ = std::chrono::seconds(max_defer_s);
+    }
+
 private:
     // Colours and background treatment for one row, so the drawing code never
     // has to branch on cancelled/bus at each site.
@@ -67,6 +78,8 @@ private:
     bool LoadFonts(const LayoutConfig &lc, std::string *err);
     void DestroyScrollers();
     void BuildScrollers();
+    void Reconcile(int64_t now);
+    void PromotePendingIfDue();
 
     RowStyle StyleFor(const Departure &d, const Widget &w) const;
     Columns  ComputeColumns(const rgb_matrix::Font &f,
@@ -91,8 +104,20 @@ private:
     const Widget *w_ticker_  = nullptr;
 
     // --- data ---
+    // incoming_: the latest fetch, ungrouped, pruned as trains leave.
+    // pending_:  prepared from incoming_, waiting for the list to reach the top.
+    // data_:     what is on screen; the scrollers are built from it.
+    FrameData incoming_;
+    bool incoming_dirty_ = false;
+    FrameData pending_;
+    bool has_pending_ = false;
+    std::chrono::steady_clock::time_point pending_since_;
+    unsigned pending_wraps_ = 0;
     FrameData data_;
     bool data_dirty_ = true;
+    int64_t next_expiry_ = std::numeric_limits<int64_t>::max();
+    int grace_s_ = 60;
+    std::chrono::steady_clock::duration max_defer_ = std::chrono::seconds(60);
 
     // --- scroller state, rebuilt whenever data or layout changes ---
     std::unique_ptr<MemoryCanvas> canvas_;

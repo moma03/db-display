@@ -55,6 +55,7 @@ Targets:
 | `led_renderer` | departure board | portable; libpq for live data |
 | `led_shmgen` | synthetic frame generator | portable |
 | `led_test_common` | host tests, no panel | portable |
+| `led_test_departures` | departure expiry / hero-change rules | portable |
 
 The renderer links only `graphics.cc` and `bdf-font.cc` out of
 rpi-rgb-led-matrix — both are GPIO-free — so it builds and runs on a laptop.
@@ -62,6 +63,7 @@ Only `led_driver` requires a Pi.
 
 ```bash
 ./build/led_test_common          # shm, gamma and dither maths
+./build/led_test_departures      # departure expiry and hero-change rules
 ```
 
 ---
@@ -296,8 +298,47 @@ reason to prefer YAML for hand-edited config.
 ### `config/renderer.json` — startup only
 
 Non-secret settings: `shm.path`, `layout` (relative paths resolve against the
-config file), `target_fps`, `wait_for_shm_s`, and `database.eva` /
-`database.refresh_seconds`.
+config file), `target_fps`, `wait_for_shm_s`, `database.eva` /
+`database.refresh_seconds` / `database.heartbeat_seconds` /
+`database.display_id`, and `departures.grace_seconds` /
+`departures.max_defer_seconds`.
+
+**Data arrives by push, not by polling.** The fetch thread keeps one
+connection open (`src/renderer/data/db_live.cpp`) and:
+
+- LISTENs on `timetable_update`. The timetable-fetcher sends the EVA number
+  there after every fetch that changed stored data, and the renderer
+  re-queries only for its own station. `refresh_seconds` (default 120) is just
+  the fallback for a lost notification or a fetcher too old to send them.
+- Subscribes this panel in the fetcher's `display_subscriptions` table and
+  renews the row every `heartbeat_seconds` (default 30). While the row is
+  fresh the fetcher polls this station every 30 s instead of 60 s, and fetches
+  it at all if it is not in the fetcher's own list. The row is deleted on
+  shutdown. `display_id` (or `--display-id`) names the panel; the default is
+  `<hostname>:<shm path>`.
+- Uses TCP keepalives, so a dead server or a dropped Wi-Fi link is noticed
+  within about a minute. Reconnects back off from 2 s to 60 s, and every
+  reconnect re-queries, since notifications sent while disconnected are lost.
+
+Against a fetcher without subscriptions the table is missing; the renderer
+logs that once and works by polling alone.
+
+**Departed trains leave on the wall clock, not the fetch cycle.** A departure
+is removed `grace_seconds` (default 60) after its effective time -- the delayed
+time if there is one, else the planned time -- checked every frame. The SQL
+uses the same grace, so a fetch never brings back a row that was just pruned.
+The list is sorted by effective time, so the hero is always the first to go.
+
+Rebuilding the list resets its scroll position, so changes are timed:
+
+| change | shown |
+|---|---|
+| hero expires, or a fetch changes the hero | immediately |
+| list does not scroll | immediately |
+| only rows below the hero change | when the list pages back to the top |
+| still waiting after `max_defer_seconds` (default 60) | anyway |
+
+Expiry depends on the Pi's clock, so it needs NTP.
 
 **No credentials.** If this file contains `database.host`, `.port`, `.dbname`,
 `.user` or `.password`, the renderer refuses to start and tells you which

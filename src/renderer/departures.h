@@ -8,6 +8,7 @@
 #ifndef LED_RENDERER_DEPARTURES_H
 #define LED_RENDERER_DEPARTURES_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,8 @@ struct Departure {
     bool destChanged = false;    // destination differs from the planned one
     std::string stop_id;         // "<tripId>-<stopIndex>"
     std::string wings;           // pipe-separated trip ids of coupled parts
+    int64_t departAt = 0;        // unix seconds of the effective departure
+                                 // (changed time, else planned); 0 = never expires
 
     // Filled in by GroupWings(): members of a wing group are made adjacent.
     int wingCount = 1;           // parts in this train's group (1 = solo)
@@ -43,6 +46,22 @@ void GroupWings(std::vector<Departure> &list);
 
 // Number of leading departures forming the hero's wing group.
 int HeroGroupSize(const std::vector<Departure> &list);
+
+// Drop departures whose effective time is at least `grace_s` seconds in the
+// past. The fetcher's data is the newest we know: if that time has passed and
+// no later delay moved it, the train has left. A delay announced after we
+// pruned simply brings the row back on the next fetch. Run on the ungrouped
+// list, before GroupWings(), so wing positions are computed on what remains.
+void PruneDeparted(std::vector<Departure> &list, int64_t now, int grace_s);
+
+// Wall-clock second at which PruneDeparted() will next remove something, or
+// INT64_MAX if nothing in `list` ever expires.
+int64_t NextExpiry(const std::vector<Departure> &list, int grace_s);
+
+// Whether the hero wing group differs between two grouped lists. The hero is
+// what the board is read by, so a change there is shown at once; everything
+// else can wait for the list's page scroller to come back to the top.
+bool HeroChanged(const std::vector<Departure> &a, const std::vector<Departure> &b);
 
 // Replacement-bus services have no track, so their platform arrives empty and
 // the display writes BUS there instead. The API reports them with category

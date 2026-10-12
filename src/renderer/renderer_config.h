@@ -28,7 +28,24 @@ struct RendererConfig {
     std::string db_user;
     std::string db_password;
     int         eva       = 8000297;
-    int         refresh_seconds = 30;
+    // Fallback re-query interval. Normally the fetcher's NOTIFY triggers a
+    // re-query as soon as new data is stored; this only matters if a
+    // notification is lost or the fetcher is too old to send them.
+    int         refresh_seconds = 120;
+    // How often this display renews its row in display_subscriptions. Must
+    // stay well below the fetcher's subscription_ttl_seconds (default 120).
+    int         heartbeat_seconds = 30;
+    // Names this panel in display_subscriptions. Empty = "<hostname>:<shm path>".
+    std::string display_id;
+
+    // --- departure expiry ---
+    // A departure leaves the board this many seconds after its effective
+    // (delayed, else planned) time, independent of the fetch cycle.
+    int departure_grace_seconds = 60;
+    // Changes that do not touch the hero wait for the list to page back to
+    // the top, so the board does not jump mid-scroll -- but never longer than
+    // this.
+    int max_defer_seconds = 60;
 };
 
 bool LoadRendererConfig(const std::string &path, RendererConfig *cfg, std::string *err);

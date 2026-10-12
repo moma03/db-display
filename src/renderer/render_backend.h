@@ -42,7 +42,7 @@ public:
     virtual bool Reload(std::shared_ptr<const LayoutConfig> layout, std::string *err) = 0;
 
     // Hand the backend fresh data. Cheap to call with unchanged data: the
-    // backend decides whether anything needs rebuilding.
+    // backend decides whether and when anything needs rebuilding.
     virtual void SetData(const FrameData &data) = 0;
 
     // Draw one complete frame.

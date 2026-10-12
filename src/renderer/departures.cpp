@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <functional>
+#include <limits>
 #include <unordered_map>
 
 namespace led {
@@ -21,7 +22,8 @@ bool operator==(const Departure &a, const Departure &b) {
            a.stops == b.stops && a.cancelled == b.cancelled &&
            a.category == b.category && a.destChanged == b.destChanged &&
            a.wings == b.wings && a.wingCount == b.wingCount &&
-           a.wingPos == b.wingPos && a.notes == b.notes;
+           a.wingPos == b.wingPos && a.notes == b.notes &&
+           a.departAt == b.departAt;
 }
 
 static bool StartsWithBus(const std::string &s) {
@@ -124,6 +126,29 @@ void GroupWings(std::vector<Departure> &list) {
 int HeroGroupSize(const std::vector<Departure> &list) {
     if (list.empty()) return 0;
     return std::min(list[0].wingCount, static_cast<int>(list.size()));
+}
+
+void PruneDeparted(std::vector<Departure> &list, int64_t now, int grace_s) {
+    list.erase(std::remove_if(list.begin(), list.end(),
+                              [&](const Departure &d) {
+                                  return d.departAt > 0 && now >= d.departAt + grace_s;
+                              }),
+               list.end());
+}
+
+int64_t NextExpiry(const std::vector<Departure> &list, int grace_s) {
+    int64_t next = std::numeric_limits<int64_t>::max();
+    for (const Departure &d : list)
+        if (d.departAt > 0) next = std::min(next, d.departAt + grace_s);
+    return next;
+}
+
+bool HeroChanged(const std::vector<Departure> &a, const std::vector<Departure> &b) {
+    const int na = HeroGroupSize(a), nb = HeroGroupSize(b);
+    if (na != nb) return true;
+    for (int i = 0; i < na; ++i)
+        if (a[i] != b[i]) return true;
+    return false;
 }
 
 Departure NoDeparturesPlaceholder() {

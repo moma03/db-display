@@ -28,10 +28,34 @@
   // Seconds to wait for the driver's shared-memory segment before giving up.
   "wait_for_shm_s": 30,
 
+  "departures": {
+    // A train leaves the board this long after its effective (delayed, else
+    // planned) time -- checked every frame, not only when data is fetched.
+    // DB times are whole minutes, so 60 means: shown throughout its departure
+    // minute, gone at the start of the next. Raise it if trains vanish while
+    // still at the platform because the delay forecast was too optimistic.
+    "grace_seconds": 60,
+    // Changes that do not touch the top (hero) train wait until the list has
+    // paged back to the top, so the board never jumps mid-scroll. This caps
+    // that wait for very long lists.
+    "max_defer_seconds": 60
+  },
+
   "database": {
     // Non-secret behaviour only. The hub overrides eva per subprogram
     // via --eva, so this is just the standalone default.
     "eva": 8000297,
-    "refresh_seconds": 30
+    // The renderer keeps one connection open and re-queries when the
+    // timetable-fetcher announces new data for this station (NOTIFY). This
+    // timer is only the fallback for a lost notification or an older fetcher.
+    "refresh_seconds": 120,
+    // The display renews its row in the fetcher's display_subscriptions table
+    // this often. While the row is fresh the fetcher polls this station fast,
+    // and fetches it at all if it is not in the fetcher's own station list.
+    // Keep it well below the fetcher's subscription_ttl_seconds (120).
+    "heartbeat_seconds": 30
+    // Optional. Names this panel in display_subscriptions; one row per id.
+    // Unset = "<hostname>:<shm path>". The hub can also pass --display-id.
+    // "display_id": "hallway"
   }
 }

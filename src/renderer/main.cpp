@@ -7,12 +7,14 @@
 //
 // Threads:
 //   main    draw -> publish, paced to target_fps
-//   fetch   blocking database queries (low priority)
+//   fetch   one persistent DB session: waits for the fetcher's NOTIFY,
+//           re-queries, keeps this display's subscription alive (low priority)
 //   watch   inotify on layout.json (low priority, inside LayoutWatcher)
 
 #include <signal.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -25,6 +27,7 @@
 #include "cpp_backend.h"
 #if HAVE_LIBPQ
 #include "data/db_fetcher.h"
+#include "data/db_live.h"
 #endif
 #include "frame_shm.h"
 #include "layout_watcher.h"
@@ -37,7 +40,8 @@ void OnSignal(int) { g_stop.store(true); }
 
 void Usage(const char *a0) {
     std::fprintf(stderr,
-        "usage: %s [--config PATH] [--layout PATH] [--demo] [--eva N] [--once OUT.ppm]\n"
+        "usage: %s [--config PATH] [--layout PATH] [--demo] [--eva N] [--display-id ID]\n"
+        "          [--once OUT.ppm]\n"
         "\n"
         "  --config PATH   renderer config JSON (default config/renderer.json)\n"
         "  --layout PATH   override the layout path from the config\n"
@@ -46,6 +50,8 @@ void Usage(const char *a0) {
         "                  i.e. the layout's minimum content -- use with --once\n"
         "                  to check that optional widgets give their space back\n"
         "  --eva N         override the station EVA number\n"
+        "  --display-id ID name of this panel in the fetcher's subscription table\n"
+        "                  (default <hostname>:<shm path>)\n"
         "  --once OUT.ppm  render a single frame to a PPM file and exit\n"
         "                  (no shared memory, no panel -- works anywhere)\n",
         a0);
@@ -148,7 +154,7 @@ int main(int argc, char **argv) {
     using namespace led;
 
     std::string config_path = "config/renderer.json";
-    std::string layout_override, once_path;
+    std::string layout_override, once_path, display_id_override;
     bool demo = false, demo_minimal = false;
     int eva_override = 0;
 
@@ -158,6 +164,7 @@ int main(int argc, char **argv) {
         else if (a == "--layout" && i + 1 < argc) layout_override = argv[++i];
         else if (a == "--once"   && i + 1 < argc) once_path = argv[++i];
         else if (a == "--eva"    && i + 1 < argc) eva_override = std::atoi(argv[++i]);
+        else if (a == "--display-id" && i + 1 < argc) display_id_override = argv[++i];
         else if (a == "--demo") demo = true;
         else if (a == "--demo-minimal") { demo = true; demo_minimal = true; }
         else if (a == "--help" || a == "-h") { Usage(argv[0]); return 0; }
@@ -172,6 +179,12 @@ int main(int argc, char **argv) {
     }
     if (!layout_override.empty()) cfg.layout_path = layout_override;
     if (eva_override != 0) cfg.eva = eva_override;
+    if (!display_id_override.empty()) cfg.display_id = display_id_override;
+    if (cfg.display_id.empty()) {
+#if HAVE_LIBPQ
+        cfg.display_id = DefaultDisplayId(cfg.shm_path);
+#endif
+    }
 
     LayoutWatcher watcher;
     if (!watcher.Start(cfg.layout_path, &err)) {
@@ -184,6 +197,7 @@ int main(int argc, char **argv) {
                  layout->widgets.size());
 
     CppRenderBackend backend;
+    backend.SetExpiry(cfg.departure_grace_seconds, cfg.max_defer_seconds);
 
     // ---- one-shot mode: render to a PPM and exit. No shm, no panel, no
     // database -- this is how the layout gets iterated on without hardware.
@@ -260,9 +274,10 @@ int main(int argc, char **argv) {
         DBConnectionConfig db;
         db.host = cfg.db_host; db.port = cfg.db_port; db.dbname = cfg.db_name;
         db.user = cfg.db_user; db.password = cfg.db_password; db.eva = cfg.eva;
+        db.grace_seconds = cfg.departure_grace_seconds;
         // Never log db.password.
-        std::fprintf(stderr, "renderer: live mode, %s@%s:%s/%s eva=%d every %ds "
-                             "(credentials from %s)\n",
+        std::fprintf(stderr, "renderer: live mode, %s@%s:%s/%s eva=%d, on NOTIFY "
+                             "(fallback every %ds) (credentials from %s)\n",
                      db.user.empty() ? "<no user>" : db.user.c_str(),
                      db.host.c_str(), db.port.c_str(), db.dbname.c_str(),
                      db.eva, cfg.refresh_seconds,
@@ -274,38 +289,81 @@ int main(int argc, char **argv) {
                 "to config/.env and fill it in, or pass --demo.\n");
 
         fetch = std::thread([&shared, db, &cfg] {
-            while (!g_stop.load(std::memory_order_relaxed)) {
-                FetchedStationInfo st;
-                std::vector<FetchedDeparture> fetched;
-                std::string ticker;
-                // Blocking network I/O. This is exactly the work that used to
-                // share a process with the GPIO loop.
-                const int n = FetchDepartures(db, st, fetched, ticker);
-                if (n >= 0) {
-                    FrameData fd;
-                    fd.station = st.name;
-                    fd.ticker  = ticker;
-                    for (const auto &f : fetched) {
-                        Departure d;
-                        d.platform = f.platform; d.cPlatform = f.cPlatform;
-                        d.line = f.line; d.dest = f.dest;
-                        d.pTime = f.pTime; d.cTime = f.cTime; d.stops = f.stops;
-                        d.cancelled = f.cancelled; d.category = f.category;
-                        d.destChanged = f.destChanged; d.stop_id = f.stop_id;
-                        d.wings = f.wings;
-                        for (const auto &fn : f.notes) d.notes.push_back({fn.id, fn.text});
-                        fd.departures.push_back(std::move(d));
-                    }
-                    std::lock_guard<std::mutex> lk(shared.mtx);
-                    shared.data = std::move(fd);
-                    shared.has_new = true;
-                } else {
-                    std::fprintf(stderr, "renderer: DB refresh failed, keeping previous data\n");
+            using clock = std::chrono::steady_clock;
+            const auto stopping = [] { return g_stop.load(std::memory_order_relaxed); };
+
+            // Re-query on the fetcher's NOTIFY instead of on a timer. The
+            // timer stays as a slow fallback; departures still expire and
+            // countdowns still tick every frame, independent of fetches.
+            DbLiveSession live(db, cfg.display_id);
+            const auto refresh_every   = std::chrono::seconds(cfg.refresh_seconds);
+            const auto heartbeat_every = std::chrono::seconds(cfg.heartbeat_seconds);
+            auto next_refresh   = clock::now();
+            auto next_heartbeat = clock::now() + heartbeat_every;
+            bool want_fetch = true;
+
+            while (!stopping()) {
+                bool fresh = false;
+                if (!live.EnsureConnected(&fresh)) {
+                    // Retried with backoff inside; just stay responsive to stop.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                    continue;
                 }
-                for (int i = 0; i < cfg.refresh_seconds * 10 &&
-                                !g_stop.load(std::memory_order_relaxed); ++i)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (fresh) {
+                    want_fetch = true;   // whatever was announced while down is lost
+                    next_heartbeat = clock::now() + heartbeat_every;
+                }
+
+                auto now = clock::now();
+                if (now >= next_heartbeat) {
+                    next_heartbeat = now + heartbeat_every;
+                    if (!live.Heartbeat()) continue;
+                }
+
+                if (want_fetch || now >= next_refresh) {
+                    FetchedStationInfo st;
+                    std::vector<FetchedDeparture> fetched;
+                    std::string ticker;
+                    const int n = FetchDeparturesOn(live.conn(), db, st, fetched, ticker);
+                    if (n >= 0) {
+                        FrameData fd;
+                        fd.station = st.name;
+                        fd.ticker  = ticker;
+                        for (const auto &f : fetched) {
+                            Departure d;
+                            d.platform = f.platform; d.cPlatform = f.cPlatform;
+                            d.line = f.line; d.dest = f.dest;
+                            d.pTime = f.pTime; d.cTime = f.cTime; d.stops = f.stops;
+                            d.departAt = f.departAt;
+                            d.cancelled = f.cancelled; d.category = f.category;
+                            d.destChanged = f.destChanged; d.stop_id = f.stop_id;
+                            d.wings = f.wings;
+                            for (const auto &fn : f.notes) d.notes.push_back({fn.id, fn.text});
+                            fd.departures.push_back(std::move(d));
+                        }
+                        std::lock_guard<std::mutex> lk(shared.mtx);
+                        shared.data = std::move(fd);
+                        shared.has_new = true;
+                    } else {
+                        std::fprintf(stderr, "renderer: DB refresh failed, keeping previous data\n");
+                    }
+                    want_fetch = false;
+                    now = clock::now();
+                    next_refresh = now + refresh_every;
+                }
+
+                // Block on the connection's socket until a notification, the
+                // next timer, or at most 250 ms so a stop request is seen.
+                const auto until = std::min(next_refresh, next_heartbeat);
+                const auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    until - now).count();
+                const int timeout = static_cast<int>(std::max<long long>(
+                    0, std::min<long long>(wait_ms, 250)));
+                if (live.WaitForUpdate(timeout) == DbLiveSession::Wait::kNotified)
+                    want_fetch = true;
             }
+            // `live` unsubscribes in its destructor, so the fetcher stops
+            // fetching a temporary station without waiting for the TTL.
         });
 #endif  // HAVE_LIBPQ
     }

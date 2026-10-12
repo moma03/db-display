@@ -114,6 +114,7 @@ set(RENDERER_SRC
   src/renderer/cpp_backend.cpp
   src/renderer/departures.cpp
   src/renderer/data/db_fetcher.cpp
+  src/renderer/data/db_live.cpp
 )
 add_executable(led_renderer ${RENDERER_SRC})
 target_include_directories(led_renderer PRIVATE src/renderer ${JSON_DIR})
@@ -133,5 +134,7 @@ target_link_libraries(led_shmgen PRIVATE led_common)
 # --- tests: portable, no panel needed --------------------------------------
 add_executable(led_test_common src/tests/test_common.cpp)
 target_link_libraries(led_test_common PRIVATE led_common)
+add_executable(led_test_departures src/tests/test_departures.cpp src/renderer/departures.cpp)
 enable_testing()
 add_test(NAME common COMMAND led_test_common)
+add_test(NAME departures COMMAND led_test_departures)
