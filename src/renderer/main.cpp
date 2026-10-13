@@ -192,7 +192,7 @@ int main(int argc, char **argv) {
 
     // For the hub, at its startup: no panel, no layout, no database.
     if (print_manifest) {
-        std::printf("%s\n", BuildDbManifest(DbDeviceInfo{}, std::to_string(cfg.eva)).dump(2).c_str());
+        std::printf("%s\n", BuildDbManifest(DbDeviceInfo{}, "").dump(2).c_str());
         return 0;
     }
 
@@ -468,6 +468,10 @@ int main(int argc, char **argv) {
                             }
                             const std::string next = NextDepartureText(fd.departures);
                             hub.Update([&](DbDisplayState &s) {
+                                // The field shows names, whatever was typed or
+                                // preset (EVA, DS100, odd spelling) -- unless a
+                                // newer request is already on its way.
+                                if (st.name_known && !changed()) s.station = st.name;
                                 s.station_name = st.name;
                                 s.status = "ok";
                                 s.next_departure = next;

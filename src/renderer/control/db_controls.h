@@ -25,12 +25,13 @@ struct DbDeviceInfo {
     std::string name = "DB Abfahrtstafel";
 };
 
-// `default_station`: what the display shows before Home Assistant says
-// otherwise -- the EVA number from renderer.json.
+// `default_station`: the station field's value before Home Assistant says
+// otherwise. Empty: the program shows renderer.json's station and reports
+// its name.
 nlohmann::json BuildDbManifest(const DbDeviceInfo &device, const std::string &default_station);
 
 struct DbDisplayState {
-    std::string station;         // as asked for: EVA number, name or DS100
+    std::string station;         // as asked for, then the official name once resolved
     std::string station_name;    // resolved; empty until known
     std::string status = "ok";   // "ok", "Bahnhof wird gesucht ...", or an error
     std::string next_departure;  // "RE 7 Kiel Hbf 04:03 (04:08)"
@@ -58,6 +59,7 @@ public:
     bool Start(ControlChannel *channel);
 
     // Change the reported state under the link's lock, then report the diff.
+    // A station request from the hub is registered under the same lock.
     void Update(const std::function<void(DbDisplayState &)> &change);
 
 private:

@@ -37,6 +37,7 @@ struct FetchedDeparture {
 struct FetchedStationInfo {
     std::string name;            // station display name
     int         eva = 0;         // EVA number
+    bool        name_known = false;  // false: `name` is the "Station <eva>" fallback
 };
 
 // --------------------------------------------------------------------------

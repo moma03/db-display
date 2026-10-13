@@ -38,11 +38,11 @@ using nlohmann::json;
 // ---------------------------------------------------------------------------
 static void TestManifest() {
     std::printf("manifest\n");
-    const json m = BuildDbManifest(DbDeviceInfo{}, "8002549");
+    const json m = BuildDbManifest(DbDeviceInfo{}, "Hamburg Hbf");
     CHECK(m["manifest_version"] == 1, "version");
     CHECK(m["device"]["id"] == "db_display", "device id");
     CHECK(m["controls"].size() == 1 && m["controls"][0]["key"] == "station" &&
-          m["controls"][0]["type"] == "text" && m["controls"][0]["default"] == "8002549",
+          m["controls"][0]["type"] == "text" && m["controls"][0]["default"] == "Hamburg Hbf",
           "one station text control: %s", m["controls"].dump().c_str());
     std::set<std::string> sensors;
     for (const auto &s : m["sensors"]) sensors.insert(s["key"].get<std::string>());

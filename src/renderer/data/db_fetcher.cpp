@@ -134,6 +134,7 @@ int FetchDeparturesOn(PGconn *conn,
         if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0) {
             station_out.name = getField(res, 0, 0);
             station_out.eva  = cfg.eva;
+            station_out.name_known = !station_out.name.empty();
         } else {
             station_out.name = "Station " + std::to_string(cfg.eva);
             station_out.eva  = cfg.eva;

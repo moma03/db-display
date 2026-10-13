@@ -11,8 +11,11 @@ json BuildDbManifest(const DbDeviceInfo &device, const std::string &default_stat
         {"manifest_version", 1},
         {"device", {{"id", device.id}, {"name", device.name}, {"model", "db-display"}}},
         {"controls", json::array({
-            // Anything the fetcher can resolve: an EVA number ("8002549"), a
-            // station name ("Hamburg Dammtor") or a DS100 code ("AH").
+            // Typed as a name ("Hamburg Dammtor"); a DS100 code ("AH") or an
+            // EVA number ("8002549") work too. Once resolved, the program
+            // reports the official name back, so the field always shows a
+            // name -- EVA numbers stay internal. Empty until then: the
+            // program shows renderer.json's station.
             {{"key", "station"}, {"type", "text"}, {"name", "Bahnhof"},
              {"icon", "mdi:train"}, {"max", 100}, {"default", default_station}},
         })},
@@ -65,11 +68,12 @@ bool DbHubLink::Start(ControlChannel *channel) {
     ControlChannel::Handlers h;
     // The reported station follows a request at once: reporting the previous
     // one first would make the hub store it over the value it just sent.
+    // on_station_ runs under the same lock, so the fetch thread -- which
+    // checks for a newer request under it before reporting a resolved name
+    // -- can never miss one and overwrite it with the old station's name.
     auto take = [this](const std::string &station) {
-        {
-            std::lock_guard<std::mutex> lk(mtx_);
-            state_.station = station;
-        }
+        std::lock_guard<std::mutex> lk(mtx_);
+        state_.station = station;
         on_station_(station);
     };
     h.on_settings = [this, take](const json &values) {

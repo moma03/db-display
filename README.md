@@ -468,8 +468,8 @@ LED_Panel_Controller can launch it like any other. Add to the hub's
     command: /home/pi/led-refactor/start.sh {matrix_options}
     manifest: /home/pi/led-refactor/start.sh --manifest
     subprograms:
-      steinheim: { name: Steinheim (Westf), settings: { station: "8005708" } }
-      paderborn: { name: Paderborn Hbf, settings: { station: "8000297" } }
+      steinheim: { name: Steinheim (Westf), settings: { station: "Steinheim (Westf)" } }
+      paderborn: { name: Paderborn Hbf, settings: { station: "Paderborn Hbf" } }
       hamburg: { name: Hamburg Hbf, settings: { station: "Hamburg Hbf" } }
 ```
 
@@ -487,7 +487,7 @@ The program has no MQTT code. At its startup the hub runs
 
 | entity | |
 |---|---|
-| `text.db_display_station` | the station: EVA number (`8002549`), name (`Hamburg Dammtor`) or DS100 (`AH`) |
+| `text.db_display_station` | the station by name (`Hamburg Dammtor`); a DS100 code (`AH`) or EVA number works too, and is replaced by the official name once resolved — EVA numbers stay internal |
 | `sensor.db_display_station_name` | the station actually shown, as resolved |
 | `sensor.db_display_next_departure` | `RE 7 Kiel Hbf 04:03 (04:08)` |
 | `sensor.db_display_status` | `ok`, `Bahnhof wird gesucht ...`, or what went wrong |
