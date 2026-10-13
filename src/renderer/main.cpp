@@ -381,9 +381,16 @@ int main(int argc, char **argv) {
                 // Until a station given by name is resolved there is nothing to
                 // query; the board says so instead.
                 std::string shown_state;
-                auto show_station_state = [&shared, &live, &shown_state, &hub] {
-                    const std::string msg = live.resolve_error().empty()
-                                                ? "Bahnhof wird gesucht ..." : live.resolve_error();
+                // A fetcher that never answers (one that predates station
+                // search, or is down) must not leave the board searching
+                // forever without a word. Still answered late if it comes.
+                const auto search_started = clock::now();
+                auto show_station_state = [&shared, &live, &shown_state, &hub, search_started] {
+                    std::string msg = live.resolve_error().empty()
+                                          ? "Bahnhof wird gesucht ..." : live.resolve_error();
+                    if (live.resolve_error().empty() &&
+                        clock::now() - search_started > std::chrono::seconds(30))
+                        msg = "Keine Antwort vom Fetcher - Bahnhof unbekannt?";
                     if (msg == shown_state) return;
                     shown_state = msg;
                     hub.Update([&](DbDisplayState &s) { s.status = msg; });

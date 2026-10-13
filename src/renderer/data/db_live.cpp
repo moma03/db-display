@@ -159,7 +159,7 @@ bool DbLiveSession::Subscribe(bool announce) {
         if (!ok && !v1 && IsMissingColumn(res)) {
             PQclear(res);
             if (!resolved()) {
-                resolve_error_ = "Fetcher zu alt für Bahnhofsnamen";
+                resolve_error_ = "Bahnhofssuche nicht verfügbar (Fetcher veraltet)";
                 std::fprintf(stderr,
                     "renderer: display_subscriptions has no station_query column -- the "
                     "timetable-fetcher predates station names. Give an EVA number "
@@ -175,7 +175,7 @@ bool DbLiveSession::Subscribe(bool announce) {
                     "timetable-fetcher predates subscriptions. Continuing without "
                     "subscribing; updates arrive by polling only.\n");
                 subscriptions_ok_ = false;
-                if (!resolved()) resolve_error_ = "Fetcher zu alt für Bahnhofsnamen";
+                if (!resolved()) resolve_error_ = "Bahnhofssuche nicht verfügbar (Fetcher veraltet)";
                 ok = true;
             } else {
                 std::fprintf(stderr, "renderer: subscription heartbeat failed: %s",
