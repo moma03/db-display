@@ -166,6 +166,7 @@ int FetchDeparturesOn(PGconn *conn,
         "  c.changed_status, "
         "  c.changed_line, "
         "  c.changed_destination, "
+        "  c.changed_path, "
         "  c.messages, "
         // Times are stored as naive Berlin local time; AT TIME ZONE makes them
         // absolute before taking the epoch, or DST would shift them by 1-2 h.
@@ -174,7 +175,7 @@ int FetchDeparturesOn(PGconn *conn,
         "FROM planned_events p "
         "LEFT JOIN LATERAL ( "
         "  SELECT ce.changed_time, ce.changed_platform, ce.changed_status, "
-        "         ce.changed_line, ce.changed_destination, "
+        "         ce.changed_line, ce.changed_destination, ce.changed_path, "
         "         ( SELECT json_agg(json_build_object("
         "               'c', em.code, 't', em.message_type"
         "           )) "
@@ -236,7 +237,7 @@ int FetchDeparturesOn(PGconn *conn,
     int cCPlat    = PQfnumber(res, "changed_platform");
     int cCStat    = PQfnumber(res, "changed_status");
     int cCLine    = PQfnumber(res, "changed_line");
-    int cCDest    = PQfnumber(res, "changed_destination");
+    int cCPath    = PQfnumber(res, "changed_path");
     int cMsgs     = PQfnumber(res, "messages");
     int cEpoch    = PQfnumber(res, "depart_epoch");
 
@@ -284,12 +285,21 @@ int FetchDeparturesOn(PGconn *conn,
                            : path;
             }
         }
-        // ... then let a changed destination replace it, flagged so the
-        // display can highlight it (shown in red).
-        std::string cd = getField(res, r, cCDest);
-        if (!cd.empty() && cd != dep.dest) {
-            dep.dest = cd;
-            dep.destChanged = true;
+        // ... then let a changed route replace it, flagged so the display can
+        // highlight it (shown in red). The destination is where the changed
+        // route (cpth) ends -- e.g. a train turned back early in Essen instead
+        // of running to Oberhausen. Not changed_destination: fetchers before
+        // the fix stored the planned *distant endpoint* (pde) there, which is
+        // something else, and newer ones store exactly this route end.
+        const std::string changedPath = getField(res, r, cCPath);
+        if (!changedPath.empty()) {
+            const auto lastPipe = changedPath.rfind('|');
+            const std::string end = (lastPipe != std::string::npos)
+                                        ? changedPath.substr(lastPipe + 1) : changedPath;
+            if (!end.empty() && end != dep.dest) {
+                dep.dest = end;
+                dep.destChanged = true;
+            }
         }
 
         // Times
@@ -305,8 +315,9 @@ int FetchDeparturesOn(PGconn *conn,
         std::string epoch = getField(res, r, cEpoch);
         if (!epoch.empty()) dep.departAt = std::atoll(epoch.c_str());
 
-        // Intermediate stops from planned path
-        std::string path = getField(res, r, cPPath);
+        // Intermediate stops: the changed route if there is one, so a train
+        // turned back early does not list the stops it no longer serves.
+        std::string path = changedPath.empty() ? getField(res, r, cPPath) : changedPath;
         if (!path.empty())
             dep.stops = pathToStops(path);
 
