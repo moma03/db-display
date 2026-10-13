@@ -40,7 +40,8 @@ void OnSignal(int) { g_stop.store(true); }
 
 void Usage(const char *a0) {
     std::fprintf(stderr,
-        "usage: %s [--config PATH] [--layout PATH] [--demo] [--eva N] [--display-id ID]\n"
+        "usage: %s [--config PATH] [--layout PATH] [--demo] [--eva N | --station S]\n"
+        "          [--display-id ID]\n"
         "          [--once OUT.ppm]\n"
         "\n"
         "  --config PATH   renderer config JSON (default config/renderer.json)\n"
@@ -50,6 +51,8 @@ void Usage(const char *a0) {
         "                  i.e. the layout's minimum content -- use with --once\n"
         "                  to check that optional widgets give their space back\n"
         "  --eva N         override the station EVA number\n"
+        "  --station S     station by EVA number, name or DS100 code; a name is\n"
+        "                  resolved via the stations table or the fetcher\n"
         "  --display-id ID name of this panel in the fetcher's subscription table\n"
         "                  (default <hostname>:<shm path>)\n"
         "  --once OUT.ppm  render a single frame to a PPM file and exit\n"
@@ -154,7 +157,7 @@ int main(int argc, char **argv) {
     using namespace led;
 
     std::string config_path = "config/renderer.json";
-    std::string layout_override, once_path, display_id_override;
+    std::string layout_override, once_path, display_id_override, station_arg;
     bool demo = false, demo_minimal = false;
     int eva_override = 0;
 
@@ -165,6 +168,7 @@ int main(int argc, char **argv) {
         else if (a == "--once"   && i + 1 < argc) once_path = argv[++i];
         else if (a == "--eva"    && i + 1 < argc) eva_override = std::atoi(argv[++i]);
         else if (a == "--display-id" && i + 1 < argc) display_id_override = argv[++i];
+        else if (a == "--station" && i + 1 < argc) station_arg = argv[++i];
         else if (a == "--demo") demo = true;
         else if (a == "--demo-minimal") { demo = true; demo_minimal = true; }
         else if (a == "--help" || a == "-h") { Usage(argv[0]); return 0; }
@@ -179,6 +183,17 @@ int main(int argc, char **argv) {
     }
     if (!layout_override.empty()) cfg.layout_path = layout_override;
     if (eva_override != 0) cfg.eva = eva_override;
+    // --station takes a number as an EVA, anything else as a name to resolve.
+    std::string station_query;
+    {
+        size_t b = station_arg.find_first_not_of(" \t");
+        size_t e = station_arg.find_last_not_of(" \t");
+        const std::string st = b == std::string::npos ? "" : station_arg.substr(b, e - b + 1);
+        if (!st.empty() && st.find_first_not_of("0123456789") == std::string::npos)
+            cfg.eva = std::atoi(st.c_str());
+        else
+            station_query = st;
+    }
     if (!display_id_override.empty()) cfg.display_id = display_id_override;
     if (cfg.display_id.empty()) {
 #if HAVE_LIBPQ
@@ -276,11 +291,13 @@ int main(int argc, char **argv) {
         db.user = cfg.db_user; db.password = cfg.db_password; db.eva = cfg.eva;
         db.grace_seconds = cfg.departure_grace_seconds;
         // Never log db.password.
-        std::fprintf(stderr, "renderer: live mode, %s@%s:%s/%s eva=%d, on NOTIFY "
+        const std::string station_desc = station_query.empty()
+            ? "eva=" + std::to_string(db.eva) : "station '" + station_query + "'";
+        std::fprintf(stderr, "renderer: live mode, %s@%s:%s/%s %s, on NOTIFY "
                              "(fallback every %ds) (credentials from %s)\n",
                      db.user.empty() ? "<no user>" : db.user.c_str(),
                      db.host.c_str(), db.port.c_str(), db.dbname.c_str(),
-                     db.eva, cfg.refresh_seconds,
+                     station_desc.c_str(), cfg.refresh_seconds,
                      cfg.env_file_used.empty() ? "the environment"
                                                : cfg.env_file_used.c_str());
         if (db.user.empty())
@@ -288,14 +305,33 @@ int main(int argc, char **argv) {
                 "renderer: WARNING no DB_PG_USER set -- copy config/.env.example "
                 "to config/.env and fill it in, or pass --demo.\n");
 
-        fetch = std::thread([&shared, db, &cfg] {
+        fetch = std::thread([&shared, db, &cfg, station_query]() mutable {
             using clock = std::chrono::steady_clock;
             const auto stopping = [] { return g_stop.load(std::memory_order_relaxed); };
 
             // Re-query on the fetcher's NOTIFY instead of on a timer. The
             // timer stays as a slow fallback; departures still expire and
             // countdowns still tick every frame, independent of fetches.
-            DbLiveSession live(db, cfg.display_id);
+            DbLiveSession live(db, cfg.display_id, station_query);
+            // Until a station given by name is resolved there is nothing to
+            // query; the board says so instead.
+            std::string shown_state;
+            auto show_station_state = [&shared, &live, &shown_state] {
+                const std::string msg = live.resolve_error().empty()
+                                            ? "Bahnhof wird gesucht ..." : live.resolve_error();
+                if (msg == shown_state) return;
+                shown_state = msg;
+                FrameData fd;
+                fd.station = live.station_query();
+                Departure d = NoDeparturesPlaceholder();
+                d.dest = msg;
+                fd.departures.push_back(d);
+                std::lock_guard<std::mutex> lk(shared.mtx);
+                shared.data = std::move(fd);
+                shared.has_new = true;
+            };
+            if (!live.resolved()) show_station_state();
+            auto next_resolution_check = clock::now();
             const auto refresh_every   = std::chrono::seconds(cfg.refresh_seconds);
             const auto heartbeat_every = std::chrono::seconds(cfg.heartbeat_seconds);
             auto next_refresh   = clock::now();
@@ -320,7 +356,24 @@ int main(int argc, char **argv) {
                     if (!live.Heartbeat()) continue;
                 }
 
-                if (want_fetch || now >= next_refresh) {
+                if (!live.resolved()) {
+                    // Waiting for the fetcher (NOTIFY station_resolved), with a
+                    // slow poll in case the notification is lost.
+                    if (want_fetch || now >= next_resolution_check) {
+                        next_resolution_check = now + std::chrono::seconds(5);
+                        want_fetch = false;
+                        live.CheckResolution();
+                    }
+                    if (!live.resolved()) show_station_state();
+                }
+                // Resolved just now -- by the fetcher, or from the stations
+                // table while connecting.
+                if (live.resolved() && db.eva != live.eva()) {
+                    db.eva = live.eva();
+                    want_fetch = true;
+                }
+
+                if (live.resolved() && (want_fetch || now >= next_refresh)) {
                     FetchedStationInfo st;
                     std::vector<FetchedDeparture> fetched;
                     std::string ticker;
@@ -354,7 +407,8 @@ int main(int argc, char **argv) {
 
                 // Block on the connection's socket until a notification, the
                 // next timer, or at most 250 ms so a stop request is seen.
-                const auto until = std::min(next_refresh, next_heartbeat);
+                const auto until = std::min(live.resolved() ? next_refresh : next_resolution_check,
+                                            next_heartbeat);
                 const auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     until - now).count();
                 const int timeout = static_cast<int>(std::max<long long>(

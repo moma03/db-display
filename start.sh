@@ -4,6 +4,7 @@
 # LED_Panel_Controller hub can launch it like any other display program.
 #
 #   ./start.sh --eva 8002549 --led-rows=64 --led-cols=128 ... [--demo]
+#   ./start.sh --station "Hamburg Dammtor" --led-rows=64 ...
 #
 # The hub runs exactly one command per program and knows nothing about how it
 # is implemented, so the split has to look like a single process from outside.
@@ -50,6 +51,8 @@ while [ $# -gt 0 ]; do
     --led-*)          LED_ARGS+=("$1"); shift ;;
     --eva)            REN_ARGS+=(--eva "${2:-}"); shift 2 ;;
     --eva=*)          REN_ARGS+=(--eva "${1#*=}"); shift ;;
+    --station)        REN_ARGS+=(--station "${2:-}"); shift 2 ;;
+    --station=*)      REN_ARGS+=(--station "${1#*=}"); shift ;;
     --demo)           REN_ARGS+=(--demo); shift ;;
     --layout)         LAYOUT="${2:-$LAYOUT}"; shift 2 ;;
     --driver-config)  DRIVER_CFG="${2:-$DRIVER_CFG}"; shift 2 ;;

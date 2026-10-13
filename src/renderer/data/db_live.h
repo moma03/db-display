@@ -10,6 +10,10 @@
 //  * Keeps this display's row in "display_subscriptions" alive (heartbeat).
 //    The fetcher polls subscribed stations faster, and fetches a station
 //    outside its own list temporarily while some display shows it.
+//  * Resolves a station given by name: first from the "stations" table (exact
+//    name or DS100), else by asking the fetcher -- the subscription row then
+//    carries station_query instead of an EVA, the fetcher looks it up with the
+//    DB API, fills in eva (or resolve_error) and NOTIFYs "station_resolved".
 //
 // Both channels and the table are defined in
 // timetable-fetcher/src/db_manager.py -- keep the names in sync.
@@ -29,7 +33,10 @@ public:
     enum class Wait { kNotified, kTimeout, kLost };
 
     // `display_id` names this panel in display_subscriptions; one row per id.
-    DbLiveSession(const DBConnectionConfig &cfg, std::string display_id);
+    // `station_query` is a station name or DS100 code to resolve; empty when
+    // cfg.eva is already the station's EVA number.
+    DbLiveSession(const DBConnectionConfig &cfg, std::string display_id,
+                  std::string station_query = "");
     ~DbLiveSession();   // unsubscribes (best effort) and closes
 
     DbLiveSession(const DbLiveSession &) = delete;
@@ -53,16 +60,30 @@ public:
     // Removes the subscription row and tells the fetcher. Called on shutdown.
     void Unsubscribe();
 
+    // Station resolution. eva() is 0 until the station is known.
+    int eva() const { return eva_; }
+    bool resolved() const { return eva_ > 0; }
+    const std::string &station_query() const { return query_; }
+    // Why the station could not be resolved, or empty (still waiting / done).
+    const std::string &resolve_error() const { return resolve_error_; }
+    // Reads the fetcher's answer from our subscription row. Returns true once
+    // the station is resolved. Cheap; call on station_resolved or every few s.
+    bool CheckResolution();
+
     PGconn *conn() const { return conn_; }
 
 private:
     bool Connect();
     void Drop(const char *why);
     bool Subscribe(bool announce);
+    bool LookupCachedStation();
     bool DrainNotifies();   // true if one of them is for our station
 
     DBConnectionConfig cfg_;
     std::string display_id_;
+    std::string query_;
+    int eva_ = 0;
+    std::string resolve_error_;
     std::string eva_str_;
     PGconn *conn_ = nullptr;
     bool subscriptions_ok_ = true;   // false once the table turned out missing
