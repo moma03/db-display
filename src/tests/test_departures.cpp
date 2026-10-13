@@ -1,6 +1,6 @@
 // test_departures.cpp
 // Host-side tests for the departure rules that decide what stays on the board:
-// expiry against the wall clock, and whether a change touches the hero.
+// expiry against the wall clock, and which changes can be shown in place.
 //
 // Build and run:  cmake --build build --target led_test_departures && ./build/led_test_departures
 
@@ -86,27 +86,49 @@ static void TestWingPruneThenGroup() {
 }
 
 // ---------------------------------------------------------------------------
-static void TestHeroChanged() {
-    std::printf("hero changed\n");
+static void TestSameTrains() {
+    std::printf("same trains\n");
     const int64_t t = 1'000'000;
-    std::vector<Departure> base = {Dep("A", t), Dep("B", t + 60), Dep("C", t + 120)};
+    auto a = Dep("A", t); a.stop_id = "1-2507311238-3";
+    auto b = Dep("B", t + 60); b.stop_id = "2-2507311239-3";
+    std::vector<Departure> base = {a, b};
 
-    auto l = base;
-    CHECK(!HeroChanged(base, l), "identical lists");
+    auto l = base; l[0].cTime = "12:45"; l[0].departAt += 420;
+    CHECK(SameTrains(base, l), "a delay does not make it a different train");
 
-    l = base; l[2].cTime = "12:45";
-    CHECK(!HeroChanged(base, l), "a list-row change must not count as a hero change");
+    l = {b, a};
+    CHECK(!SameTrains(base, l), "reordering must be detected");
 
-    l = base; l.push_back(Dep("D", t + 600));
-    CHECK(!HeroChanged(base, l), "a train added at the bottom is not a hero change");
+    l = {b};
+    CHECK(!SameTrains(base, l), "a departed train must be detected");
 
-    l = base; l[0].cTime = "12:40";
-    CHECK(HeroChanged(base, l), "hero delay not detected");
+    // Rows without a stop_id (demo data) are told apart by their contents.
+    CHECK(!SameTrains({Dep("X", 0)}, {Dep("Y", 0)}), "keyless rows compared by content");
+}
 
-    l = base; l.erase(l.begin());
-    CHECK(HeroChanged(base, l), "hero departure not detected");
+// ---------------------------------------------------------------------------
+static void TestSameShape() {
+    std::printf("same shape\n");
+    auto a = Dep("Dortmund", 1'000'000); a.stop_id = "1-2507311238-3";
+    a.pTime = "12:38"; a.platform = "4"; a.line = "RE 11";
 
-    CHECK(HeroChanged({}, base), "first data must count as a hero change");
+    // Drawn fresh every frame: may be patched in place.
+    auto b = a; b.cTime = "12:45"; b.departAt += 420;
+    CHECK(SameShape(a, b), "delay must be patchable");
+    b = a; b.cPlatform = "7";
+    CHECK(SameShape(a, b), "platform change must be patchable");
+
+    // Baked into scrollers or geometry: needs a rebuild.
+    b = a; b.notes = {{1, "Verspätung"}};
+    CHECK(!SameShape(a, b), "a new reason line changes the row height");
+    b = a; b.dest = "Hamm";
+    CHECK(!SameShape(a, b), "destination lives in a scroller");
+    b = a; b.cancelled = true;
+    CHECK(!SameShape(a, b), "cancellation recolours the scrollers");
+    b = a; b.category = "Bus";
+    CHECK(!SameShape(a, b), "turning into a bus recolours the scrollers");
+    b = a; b.stop_id = "9-2507311238-3";
+    CHECK(!SameShape(a, b), "a different train is never the same shape");
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +136,8 @@ int main() {
     TestPrune();
     TestNextExpiry();
     TestWingPruneThenGroup();
-    TestHeroChanged();
+    TestSameTrains();
+    TestSameShape();
     if (g_failures) std::printf("%d FAILURE(S)\n", g_failures);
     else            std::printf("all passed\n");
     return g_failures ? 1 : 0;

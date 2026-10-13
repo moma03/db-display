@@ -58,10 +58,19 @@ void PruneDeparted(std::vector<Departure> &list, int64_t now, int grace_s);
 // INT64_MAX if nothing in `list` ever expires.
 int64_t NextExpiry(const std::vector<Departure> &list, int grace_s);
 
-// Whether the hero wing group differs between two grouped lists. The hero is
-// what the board is read by, so a change there is shown at once; everything
-// else can wait for the list's page scroller to come back to the top.
-bool HeroChanged(const std::vector<Departure> &a, const std::vector<Departure> &b);
+// Identity of a departure across fetches: its stop_id, or for rows without
+// one (demo data, the placeholder) the fields that make it recognisable.
+std::string DepartureKey(const Departure &d);
+
+// Same departures in the same order, whatever their times or platforms say.
+bool SameTrains(const std::vector<Departure> &a, const std::vector<Departure> &b);
+
+// Whether `b` can replace `a` on screen without rebuilding anything: same
+// train, and nothing differs that is baked into a scroller (destination, via,
+// reasons, and the colours cancelled/bus imply) or into the geometry (reason
+// line present, wing position). What may differ is drawn fresh every frame:
+// times, platform, line name.
+bool SameShape(const Departure &a, const Departure &b);
 
 // Replacement-bus services have no track, so their platform arrives empty and
 // the display writes BUS there instead. The API reports them with category

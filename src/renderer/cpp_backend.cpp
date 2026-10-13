@@ -14,6 +14,8 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <unordered_map>
+#include <unordered_set>
 
 using rgb_matrix::Canvas;
 using rgb_matrix::Color;
@@ -121,6 +123,8 @@ public:
     // is the one moment a rebuild (which also resets to the top) goes unseen.
     unsigned wraps() const { return wraps_; }
     bool scrolls() const { return content_h_ > vp_->visibleHeight(); }
+    // Top of the view in content pixels. Only grows until the next wrap.
+    float offset() const { return cur_; }
 
     float scrollFraction() const {
         const int max_off = std::max(0, content_h_ - vp_->visibleHeight());
@@ -168,7 +172,7 @@ private:
 // so with no message there is nothing to draw and its strip belongs to
 // whatever flows against it.
 bool CppRenderBackend::IsWidgetVisible(const Widget &w) const {
-    if (w.type == WidgetType::kTicker) return !data_.ticker.empty();
+    if (w.type == WidgetType::kTicker) return !ticker_.empty();
     return true;
 }
 
@@ -182,12 +186,16 @@ int CppRenderBackend::WidgetBottom(const Widget &w) const {
 
 CppRenderBackend::~CppRenderBackend() { DestroyScrollers(); }
 
-void CppRenderBackend::DestroyScrollers() {
+void CppRenderBackend::DestroyHeroScrollers() {
     for (auto *s : heroDests_) delete s;
     heroDests_.clear();
     for (auto *s : heroVias_) delete s;
     heroVias_.clear();
     delete heroNote_;       heroNote_ = nullptr;
+}
+
+void CppRenderBackend::DestroyScrollers() {
+    DestroyHeroScrollers();
     delete tickerScroller_; tickerScroller_ = nullptr;
     for (auto *s : destScrollers_) delete s;
     destScrollers_.clear();
@@ -260,11 +268,9 @@ void CppRenderBackend::SetData(const FrameData &d) {
     incoming_dirty_ = true;
 }
 
-// Turn incoming_ into what the board should show now, and decide whether to
-// show it at once. Rebuilding the scrollers resets every scroll position, so
-// a change is shown immediately only when the hero changed (the board is read
-// by it) or there is no scroll position to lose; anything further down waits
-// for the list to page back to the top.
+// Turn incoming_ into the target and bring the screen as close to it as can
+// be done without a visible jump. Called when a fetch arrives and when the
+// earliest departure expires.
 void CppRenderBackend::Reconcile(int64_t now) {
     incoming_dirty_ = false;
     const size_t before = incoming_.departures.size();
@@ -277,26 +283,121 @@ void CppRenderBackend::Reconcile(int64_t now) {
     FrameData next = incoming_;
     if (next.departures.empty()) next.departures.push_back(NoDeparturesPlaceholder());
     GroupWings(next.departures);
+    if (next == target_ && !data_dirty_) return;
+    target_ = std::move(next);
+    ApplyTarget();
+}
 
-    if (next == data_) { has_pending_ = false; return; }
-    if (has_pending_ && next == pending_) return;
+// Rebuilding the list resets its scroll position, so a full rebuild is kept
+// for the moment the list is back at the top anyway. Until then:
+//
+//   * rows whose change is drawn fresh every frame (times, platform) are
+//     patched in place -- the board updates the way a real one does;
+//   * the hero is updated on its own, as long as its height (and so the
+//     list's position) stays put, and the list rows it now duplicates are
+//     already scrolled past;
+//   * everything else -- new trains, new reasons, reordering -- waits for the
+//     wrap, or for max_defer_ at the latest.
+void CppRenderBackend::ApplyTarget() {
+    if (data_dirty_ || !pageScroll_ || !pageScroll_->scrolls()) { ShowTargetNow(); return; }
 
-    const bool immediate = data_dirty_ || !pageScroll_ || !pageScroll_->scrolls() ||
-                           HeroChanged(next.departures, data_.departures);
-    if (immediate) {
-        data_ = std::move(next);
-        data_dirty_ = true;
-        has_pending_ = false;
-        return;
-    }
+    const std::vector<Departure> &all = target_.departures;
+    const size_t n = static_cast<size_t>(HeroGroupSize(all));
+    const std::vector<Departure> hero(all.begin(), all.begin() + n);
+    const std::vector<Departure> rows(all.begin() + n, all.end());
+
+    station_ = target_.station;   // drawn fresh every frame
+    if (!UpdateHero(hero, rows)) { ShowTargetNow(); return; }
+    PatchRows(rows);
+
+    if (Settled()) { has_pending_ = false; return; }
     // Keep the first deferral's clock, so a stream of small changes cannot
-    // postpone the update forever.
+    // postpone the rebuild forever.
     if (!has_pending_) {
         pending_since_ = std::chrono::steady_clock::now();
         pending_wraps_ = pageScroll_->wraps();
+        has_pending_ = true;
     }
-    pending_ = std::move(next);
-    has_pending_ = true;
+}
+
+void CppRenderBackend::ShowTargetNow() {
+    const std::vector<Departure> &all = target_.departures;
+    const size_t n = static_cast<size_t>(HeroGroupSize(all));
+    hero_.assign(all.begin(), all.begin() + n);
+    rows_.assign(all.begin() + n, all.end());
+    station_ = target_.station;
+    ticker_  = target_.ticker;
+    data_dirty_ = true;
+    has_pending_ = false;
+}
+
+// Brings the hero up to date. Returns false when that is only possible with a
+// full rebuild (the caller then does one -- the hero is never left stale).
+bool CppRenderBackend::UpdateHero(const std::vector<Departure> &hero,
+                                  const std::vector<Departure> &rows) {
+    if (hero == hero_) return true;
+
+    // A different height would move the whole list.
+    if (HeroHeightFor(hero) != hero_h_) return false;
+
+    if (SameTrains(hero, hero_)) {
+        bool same_shape = true;
+        for (size_t i = 0; i < hero.size(); ++i)
+            if (!SameShape(hero_[i], hero[i])) { same_shape = false; break; }
+        // Only times/platform changed and the columns still fit: no rebuild,
+        // so the destination keeps scrolling where it was.
+        if (same_shape && HeroColumns(hero) == heroCols_) { hero_ = hero; return true; }
+        hero_ = hero;
+        BuildHero();
+        return true;
+    }
+
+    // A different train moved up (normally: the hero departed). Its old list
+    // row stays in place until the wrap -- fine as long as that row, and any
+    // other the target no longer lists, is above the view: the pager only
+    // moves down until it wraps, so they cannot come back into sight.
+    if (!OnlyStaleRowsAboveView(rows)) return false;
+    hero_ = hero;
+    BuildHero();
+    return true;
+}
+
+bool CppRenderBackend::OnlyStaleRowsAboveView(const std::vector<Departure> &rows) const {
+    std::unordered_set<std::string> keep;
+    for (const Departure &d : rows) keep.insert(DepartureKey(d));
+    const float top = pageScroll_->offset();
+    for (size_t i = 0; i < rows_.size(); ++i) {
+        if (keep.count(DepartureKey(rows_[i]))) continue;
+        if (row_y_offsets_[i] + row_heights_[i] > top) return false;
+    }
+    return true;
+}
+
+// Copies every row whose change is drawn fresh each frame (SameShape) from the
+// target, visible or not. Done all-or-nothing on the columns: a change that
+// would widen the time column (the first delay in an otherwise punctual list)
+// would narrow every destination, so it waits for the rebuild.
+void CppRenderBackend::PatchRows(const std::vector<Departure> &rows) {
+    std::unordered_map<std::string, const Departure *> by_key;
+    for (const Departure &d : rows) by_key[DepartureKey(d)] = &d;
+
+    std::vector<Departure> patched = rows_;
+    bool any = false;
+    for (Departure &d : patched) {
+        auto it = by_key.find(DepartureKey(d));
+        if (it == by_key.end() || *it->second == d || !SameShape(d, *it->second)) continue;
+        d = *it->second;
+        any = true;
+    }
+    if (any && ListColumns(patched) == listCols_) rows_ = std::move(patched);
+}
+
+bool CppRenderBackend::Settled() const {
+    const std::vector<Departure> &all = target_.departures;
+    const size_t n = static_cast<size_t>(HeroGroupSize(all));
+    return ticker_ == target_.ticker && hero_.size() == n && rows_.size() == all.size() - n &&
+           std::equal(hero_.begin(), hero_.end(), all.begin()) &&
+           std::equal(rows_.begin(), rows_.end(), all.begin() + n);
 }
 
 void CppRenderBackend::PromotePendingIfDue() {
@@ -304,10 +405,7 @@ void CppRenderBackend::PromotePendingIfDue() {
     const bool due = data_dirty_ ||   // rebuilding anyway (layout reload)
                      !pageScroll_ || pageScroll_->wraps() != pending_wraps_ ||
                      std::chrono::steady_clock::now() - pending_since_ >= max_defer_;
-    if (!due) return;
-    data_ = std::move(pending_);
-    data_dirty_ = true;
-    has_pending_ = false;
+    if (due) ShowTargetNow();
 }
 
 CppRenderBackend::RowStyle CppRenderBackend::StyleFor(const Departure &dep,
@@ -372,67 +470,115 @@ CppRenderBackend::Columns CppRenderBackend::ComputeColumns(
     return c;
 }
 
+CppRenderBackend::Columns CppRenderBackend::HeroColumns(
+    const std::vector<Departure> &hero) const {
+    std::vector<const Departure *> deps;
+    for (const Departure &d : hero) deps.push_back(&d);
+    return ComputeColumns(*fonts_.at(w_hero_->font_big), deps, w_hero_->rect.x, width_,
+                          hero.size() > 1);
+}
+
+CppRenderBackend::Columns CppRenderBackend::ListColumns(
+    const std::vector<Departure> &rows) const {
+    std::vector<const Departure *> deps;
+    bool wings = false;
+    for (const Departure &d : rows) {
+        deps.push_back(&d);
+        if (d.wingCount > 1) wings = true;
+    }
+    // x0 = 1 leaves room for the changed-platform box, which starts at x-1.
+    return ComputeColumns(*fonts_.at(w_list_->font), deps, 1, width_ - list_content_x_, wings);
+}
+
+// The hero's rendered height: one big line plus a via line per wing part, and
+// a reason line if any part has one. The list hangs below it, so this is what
+// decides whether the hero can change without moving the list.
+int CppRenderBackend::HeroHeightFor(const std::vector<Departure> &hero) const {
+    const Font &bigFont   = *fonts_.at(w_hero_->font_big);
+    const Font &smallFont = *fonts_.at(w_list_->font);
+    const int count = std::max<int>(1, hero.size());
+    bool has_note = false;
+    for (const Departure &d : hero) has_note = has_note || !d.notes.empty();
+    const int baseline   = w_hero_->rect.y + w_hero_->baseline;
+    const int part_block = bigFont.height() + smallFont.height();
+    const int last_via   = baseline + (count - 1) * part_block + smallFont.height();
+    const int last_base  = has_note ? last_via + smallFont.height() : last_via;
+    const int top        = baseline - bigFont.baseline();
+    return (last_base - smallFont.baseline() + smallFont.height()) - top;
+}
+
 void CppRenderBackend::BuildScrollers() {
     DestroyScrollers();
+    BuildHero();
+    BuildList();
+}
 
-    // Invariant: there is always at least one departure to lay out. Enforced
-    // here rather than trusting callers, because the drawing code indexes
-    // list[0] unconditionally (the hero is always present).
-    //
-    // SetData() already guarantees this, but in live mode SetData() is not
-    // called until the first database fetch returns -- so the first frame after
-    // startup used to render against an empty vector and segfault. Demo mode
-    // seeds data before the loop starts, which is exactly why this only ever
-    // showed up against a real database.
-    if (data_.departures.empty())
-        data_.departures.push_back(NoDeparturesPlaceholder());
+// Hero geometry, columns and scrollers. Rebuilt on its own when only the hero
+// changed -- the caller guarantees its height did not, so the list stays put.
+void CppRenderBackend::BuildHero() {
+    DestroyHeroScrollers();
+
+    // Invariant: there is always a hero to lay out. Enforced here rather than
+    // trusting callers, because the drawing code indexes hero_[0]
+    // unconditionally. In live mode nothing is set until the first database
+    // fetch returns -- the first frame after startup used to render against an
+    // empty vector and segfault.
+    if (hero_.empty()) hero_.push_back(NoDeparturesPlaceholder());
 
     const Widget &hw = *w_hero_;
-    const Widget &lw = *w_list_;
-    const std::vector<Departure> &list = data_.departures;
-
     const Font &bigFont   = *fonts_.at(hw.font_big);
-    const Font &smallFont = *fonts_.at(lw.font);
+    const Font &smallFont = *fonts_.at(w_list_->font);
 
-    hero_count_ = HeroGroupSize(list);
-    if (hero_count_ < 1) hero_count_ = 1;
-
-    // --- column measurement, hero and list independently -------------------
-    {
-        std::vector<const Departure *> deps;
-        for (int i = 0; i < hero_count_; ++i) deps.push_back(&list[i]);
-        heroCols_ = ComputeColumns(bigFont, deps, hw.rect.x, width_, hero_count_ > 1);
-    }
-    {
-        std::vector<const Departure *> deps;
-        bool wings = false;
-        for (size_t i = hero_count_; i < list.size(); ++i) {
-            deps.push_back(&list[i]);
-            if (list[i].wingCount > 1) wings = true;
-        }
-        // x0 = 1 leaves room for the changed-platform box, which starts at x-1.
-        listCols_ = ComputeColumns(smallFont, deps, 1, width_ - list_content_x_, wings);
-    }
-
-    // --- hero block --------------------------------------------------------
-    hero_style_      = StyleFor(list[0], hw);
+    hero_count_ = static_cast<int>(hero_.size());
+    heroCols_   = HeroColumns(hero_);
+    hero_style_ = StyleFor(hero_[0], hw);
     // `baseline` is relative to the hero's own rect, so moving the widget in
     // layout.json moves the text with it.
     hero_baseline_   = hw.rect.y + hw.baseline;
     hero_part_block_ = bigFont.height() + smallFont.height();
-    const int last_via_base =
-        hero_baseline_ + (hero_count_ - 1) * hero_part_block_ + smallFont.height();
-    hero_note_baseline_ = last_via_base + smallFont.height();
+    hero_note_baseline_ = hero_baseline_ + (hero_count_ - 1) * hero_part_block_ +
+                          2 * smallFont.height();
+    hero_top_ = hero_baseline_ - bigFont.baseline();
+    hero_h_   = HeroHeightFor(hero_);
 
     std::string heroNotes;
-    for (int i = 0; i < hero_count_; ++i) {
-        const std::string n = JoinNotes(list[i]);
+    for (const Departure &d : hero_) {
+        const std::string n = JoinNotes(d);
         if (!n.empty()) { if (!heroNotes.empty()) heroNotes += " | "; heroNotes += n; }
     }
-    const bool hero_has_note = !heroNotes.empty();
-    const int hero_last_base = hero_has_note ? hero_note_baseline_ : last_via_base;
-    hero_top_ = hero_baseline_ - bigFont.baseline();
-    hero_h_   = (hero_last_base - smallFont.baseline() + smallFont.height()) - hero_top_;
+
+    for (int i = 0; i < hero_count_; ++i) {
+        const int big_base = hero_baseline_ + i * hero_part_block_;
+        const int via_base = big_base + smallFont.height();
+        const Color destCol =
+            (hero_[i].destChanged && hero_style_.lineTypeColor)
+                ? C(hw.color_dest_changed) : hero_style_.fg;
+        heroDests_.push_back(new ScrollingTextBox(
+            canvas_.get(), heroCols_.dest_x, big_base - bigFont.baseline(),
+            heroCols_.dest_w, bigFont.height(), bigFont, destCol, hero_[i].dest,
+            hw.dest_scroll.speed_px_s, hw.dest_scroll.wait_s, hw.dest_scroll.gap_px));
+        heroVias_.push_back(new ScrollingTextBox(
+            canvas_.get(), heroCols_.dest_x, via_base - smallFont.baseline(),
+            heroCols_.dest_w, smallFont.height(), smallFont, hero_style_.via,
+            "via " + hero_[i].stops,
+            hw.scroll.speed_px_s, hw.scroll.wait_s, hw.scroll.gap_px));
+    }
+    if (!heroNotes.empty()) {
+        heroNote_ = new ScrollingTextBox(
+            canvas_.get(), heroCols_.dest_x, hero_note_baseline_ - smallFont.baseline(),
+            heroCols_.dest_w, smallFont.height(), smallFont, hero_style_.note, heroNotes,
+            hw.scroll.speed_px_s, hw.scroll.wait_s, hw.scroll.gap_px);
+    }
+}
+
+// Everything below the hero: list geometry (which follows the hero's real
+// bottom), rows, pager, scrollbar and ticker. Rebuilding it resets the pager.
+void CppRenderBackend::BuildList() {
+    const Widget &hw = *w_hero_;
+    const Widget &lw = *w_list_;
+    const Font &smallFont = *fonts_.at(lw.font);
+
+    listCols_ = ListColumns(rows_);
 
     // Geometry comes from the layout file, not from where the hero happened to
     // end. The rects in layout.json are authoritative -- a layout file whose
@@ -494,37 +640,14 @@ void CppRenderBackend::BuildScrollers() {
         list_h_ = row_h_;
     }
 
-    for (int i = 0; i < hero_count_; ++i) {
-        const int big_base = hero_baseline_ + i * hero_part_block_;
-        const int via_base = big_base + smallFont.height();
-        const Color destCol =
-            (list[i].destChanged && hero_style_.lineTypeColor)
-                ? C(hw.color_dest_changed) : hero_style_.fg;
-        heroDests_.push_back(new ScrollingTextBox(
-            canvas_.get(), heroCols_.dest_x, big_base - bigFont.baseline(),
-            heroCols_.dest_w, bigFont.height(), bigFont, destCol, list[i].dest,
-            hw.dest_scroll.speed_px_s, hw.dest_scroll.wait_s, hw.dest_scroll.gap_px));
-        heroVias_.push_back(new ScrollingTextBox(
-            canvas_.get(), heroCols_.dest_x, via_base - smallFont.baseline(),
-            heroCols_.dest_w, smallFont.height(), smallFont, hero_style_.via,
-            "via " + list[i].stops,
-            hw.scroll.speed_px_s, hw.scroll.wait_s, hw.scroll.gap_px));
-    }
-    if (hero_has_note) {
-        heroNote_ = new ScrollingTextBox(
-            canvas_.get(), heroCols_.dest_x, hero_note_baseline_ - smallFont.baseline(),
-            heroCols_.dest_w, smallFont.height(), smallFont, hero_style_.note, heroNotes,
-            hw.scroll.speed_px_s, hw.scroll.wait_s, hw.scroll.gap_px);
-    }
-
     // --- list rows: measure each departure's full height up front ----------
     const int note_h = row_h_ - lw.note_tighten;
     int total = 0;
-    for (size_t i = hero_count_; i < list.size(); ++i) {
-        const int h = row_h_ + (list[i].notes.empty() ? 0 : note_h);
+    for (const Departure &d : rows_) {
+        const int h = row_h_ + (d.notes.empty() ? 0 : note_h);
         row_y_offsets_.push_back(total);
         row_heights_.push_back(h);
-        row_styles_.push_back(StyleFor(list[i], lw));
+        row_styles_.push_back(StyleFor(d, lw));
         total += h;
     }
     content_h_ = total;
@@ -555,28 +678,28 @@ void CppRenderBackend::BuildScrollers() {
     if (ticker_h_ > 0) {
         tickerScroller_ = new ScrollingTextBox(
             canvas_.get(), w_ticker_->rect.x, w_ticker_->rect.y,
-            w_ticker_->rect.w, ticker_h_, smallFont, C(w_ticker_->color), data_.ticker,
+            w_ticker_->rect.w, ticker_h_, smallFont, C(w_ticker_->color), ticker_,
             w_ticker_->scroll.speed_px_s, w_ticker_->scroll.wait_s, w_ticker_->scroll.gap_px);
     }
 
-    for (size_t i = hero_count_; i < list.size(); ++i) {
-        const size_t idx = i - hero_count_;
+    for (size_t idx = 0; idx < rows_.size(); ++idx) {
+        const Departure &d = rows_[idx];
         const int y_pos = row_y_offsets_[idx];
         const RowStyle &st = row_styles_[idx];
         const Color destCol =
-            (list[i].destChanged && st.lineTypeColor) ? C(lw.color_dest_changed) : st.fg;
+            (d.destChanged && st.lineTypeColor) ? C(lw.color_dest_changed) : st.fg;
 
         destScrollers_.push_back(new ScrollingTextBox(
             listVP_, listCols_.dest_x, y_pos + 1, listCols_.dest_w, row_h_,
-            smallFont, destCol, list[i].dest,
+            smallFont, destCol, d.dest,
             lw.dest_scroll.speed_px_s, lw.dest_scroll.wait_s, lw.dest_scroll.gap_px));
 
-        if (!list[i].notes.empty()) {
+        if (!d.notes.empty()) {
             // The reason line only has to clear the platform -- it may run
             // under the line number, which buys it a lot of reading width.
             noteScrollers_.push_back(new ScrollingTextBox(
                 listVP_, listCols_.line_x, y_pos + row_h_ - lw.note_tighten + 1,
-                listCols_.note_w, note_h, smallFont, st.note, JoinNotes(list[i]),
+                listCols_.note_w, note_h, smallFont, st.note, JoinNotes(d),
                 lw.dest_scroll.speed_px_s, lw.dest_scroll.wait_s, lw.dest_scroll.gap_px));
         } else {
             noteScrollers_.push_back(nullptr);
@@ -590,7 +713,7 @@ void CppRenderBackend::DrawHeader(Canvas *c) {
     if (w_station_) {
         const Font &f = *fonts_.at(w_station_->font);
         DrawText(c, f, w_station_->rect.x, w_station_->rect.y + f.baseline() + 1,
-                 C(w_station_->color), nullptr, data_.station.c_str());
+                 C(w_station_->color), nullptr, station_.c_str());
     }
 
     if (w_clock_) {
@@ -624,7 +747,7 @@ void CppRenderBackend::DrawHeader(Canvas *c) {
 void CppRenderBackend::DrawHero(Canvas *c) {
     const Widget &hw = *w_hero_;
     const Font &bigFont = *fonts_.at(hw.font_big);
-    const std::vector<Departure> &list = data_.departures;
+    const std::vector<Departure> &list = hero_;
     const RowStyle &st = hero_style_;
 
     if (st.fillBg)
@@ -745,8 +868,16 @@ void CppRenderBackend::RenderFrame(uint8_t *rgb, int64_t /*t_ns*/) {
     // sorted by effective time, so the hero is always the first to go.
     const int64_t now = static_cast<int64_t>(std::time(nullptr));
     if (incoming_dirty_ || now >= next_expiry_) Reconcile(now);
+
+    // Advance the pager before drawing, so a wrap to the top is seen in the
+    // same frame and the deferred rebuild lands before stale rows are drawn.
+    if (pageScroll_ && !data_dirty_) pageScroll_->Update();
     PromotePendingIfDue();
-    if (data_dirty_) { BuildScrollers(); data_dirty_ = false; }
+    if (data_dirty_) {
+        BuildScrollers();
+        data_dirty_ = false;
+        pageScroll_->Update();
+    }
 
     Canvas *c = canvas_.get();
     const LayoutConfig &lc = *layout_;
@@ -759,7 +890,6 @@ void CppRenderBackend::RenderFrame(uint8_t *rgb, int64_t /*t_ns*/) {
     DrawHero(c);
 
     listVP_->SetParent(c);
-    pageScroll_->Update();
 
     scrollBar_->SetCanvas(c);
     scrollBar_->Draw(pageScroll_->scrollFraction(), pageScroll_->viewFraction(),
@@ -768,9 +898,8 @@ void CppRenderBackend::RenderFrame(uint8_t *rgb, int64_t /*t_ns*/) {
                      w_list_->scrollbar_thumb.r, w_list_->scrollbar_thumb.g,
                      w_list_->scrollbar_thumb.b);
 
-    for (size_t i = hero_count_; i < data_.departures.size(); ++i)
-        DrawListRow(listVP_, data_.departures[i], static_cast<int>(i) - hero_count_,
-                    width_ - list_content_x_);
+    for (size_t i = 0; i < rows_.size(); ++i)
+        DrawListRow(listVP_, rows_[i], static_cast<int>(i), width_ - list_content_x_);
 
     if (tickerScroller_) {
         DrawRowBg(c, w_ticker_->rect.x, w_ticker_->rect.y, w_ticker_->rect.w, ticker_h_,

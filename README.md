@@ -329,14 +329,23 @@ time if there is one, else the planned time -- checked every frame. The SQL
 uses the same grace, so a fetch never brings back a row that was just pruned.
 The list is sorted by effective time, so the hero is always the first to go.
 
-Rebuilding the list resets its scroll position, so changes are timed:
+Rebuilding the list resets its scroll position, so a full rebuild is kept
+for the moment the list pages back to the top anyway. Until then the board
+gets as close to the new data as it can without a visible jump:
 
 | change | shown |
 |---|---|
-| hero expires, or a fetch changes the hero | immediately |
-| list does not scroll | immediately |
-| only rows below the hero change | when the list pages back to the top |
+| delay or platform change on any row, hero included | immediately, in place -- nothing rebuilt |
+| hero departs (or is replaced) while its old list row is already scrolled past | immediately; only the hero is rebuilt, the list keeps scrolling |
+| hero changes height (wing pair, reason line), or its old row is still in view | immediately, full rebuild |
+| list does not scroll | immediately, full rebuild |
+| new or removed trains, new reasons, new destination, reordering, ticker | when the list pages back to the top |
+| first delay in an all-punctual list (widens the time column) | when the list pages back to the top |
 | still waiting after `max_defer_seconds` (default 60) | anyway |
+
+"In place" covers what is drawn fresh every frame (times, platform, line).
+Anything baked into a scroller -- destination, via, reason, the colours of
+cancelled and bus rows -- or into the row geometry needs a rebuild.
 
 Expiry depends on the Pi's clock, so it needs NTP.
 

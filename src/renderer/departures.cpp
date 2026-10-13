@@ -143,12 +143,24 @@ int64_t NextExpiry(const std::vector<Departure> &list, int grace_s) {
     return next;
 }
 
-bool HeroChanged(const std::vector<Departure> &a, const std::vector<Departure> &b) {
-    const int na = HeroGroupSize(a), nb = HeroGroupSize(b);
-    if (na != nb) return true;
-    for (int i = 0; i < na; ++i)
-        if (a[i] != b[i]) return true;
-    return false;
+std::string DepartureKey(const Departure &d) {
+    if (!d.stop_id.empty()) return d.stop_id;
+    return d.line + '\x1f' + d.dest + '\x1f' + d.pTime;
+}
+
+bool SameTrains(const std::vector<Departure> &a, const std::vector<Departure> &b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (DepartureKey(a[i]) != DepartureKey(b[i])) return false;
+    return true;
+}
+
+bool SameShape(const Departure &a, const Departure &b) {
+    return DepartureKey(a) == DepartureKey(b) &&
+           a.dest == b.dest && a.destChanged == b.destChanged &&
+           a.stops == b.stops && a.notes == b.notes &&
+           a.cancelled == b.cancelled && IsBus(a) == IsBus(b) &&
+           a.wingCount == b.wingCount && a.wingPos == b.wingPos;
 }
 
 Departure NoDeparturesPlaceholder() {

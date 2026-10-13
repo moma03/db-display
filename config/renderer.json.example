@@ -35,9 +35,10 @@
     // minute, gone at the start of the next. Raise it if trains vanish while
     // still at the platform because the delay forecast was too optimistic.
     "grace_seconds": 60,
-    // Changes that do not touch the top (hero) train wait until the list has
-    // paged back to the top, so the board never jumps mid-scroll. This caps
-    // that wait for very long lists.
+    // Delays and platform changes are shown in place at once, and a departed
+    // hero is replaced without touching the list. Everything else (new trains,
+    // new reasons, reordering) waits until the list has paged back to the
+    // top, so the board never jumps mid-scroll. This caps that wait.
     "max_defer_seconds": 60
   },
 
