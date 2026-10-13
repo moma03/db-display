@@ -7,8 +7,10 @@
 //
 // Threads:
 //   main    draw -> publish, paced to target_fps
-//   fetch   one persistent DB session: waits for the fetcher's NOTIFY,
-//           re-queries, keeps this display's subscription alive (low priority)
+//   fetch   one persistent DB session per station: waits for the fetcher's
+//           NOTIFY, re-queries, keeps this display's subscription alive
+//   control the hub's control channel: the station from Home Assistant in,
+//           status out (see control/db_controls.h)
 //   watch   inotify on layout.json (low priority, inside LayoutWatcher)
 
 #include <signal.h>
@@ -19,11 +21,14 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "control/control_channel.h"
+#include "control/db_controls.h"
 #include "cpp_backend.h"
 #if HAVE_LIBPQ
 #include "data/db_fetcher.h"
@@ -53,6 +58,7 @@ void Usage(const char *a0) {
         "  --eva N         override the station EVA number\n"
         "  --station S     station by EVA number, name or DS100 code; a name is\n"
         "                  resolved via the stations table or the fetcher\n"
+        "  --manifest      print the Home Assistant controls for the hub and exit\n"
         "  --display-id ID name of this panel in the fetcher's subscription table\n"
         "                  (default <hostname>:<shm path>)\n"
         "  --once OUT.ppm  render a single frame to a PPM file and exit\n"
@@ -158,7 +164,7 @@ int main(int argc, char **argv) {
 
     std::string config_path = "config/renderer.json";
     std::string layout_override, once_path, display_id_override, station_arg;
-    bool demo = false, demo_minimal = false;
+    bool demo = false, demo_minimal = false, print_manifest = false;
     int eva_override = 0;
 
     for (int i = 1; i < argc; ++i) {
@@ -169,6 +175,7 @@ int main(int argc, char **argv) {
         else if (a == "--eva"    && i + 1 < argc) eva_override = std::atoi(argv[++i]);
         else if (a == "--display-id" && i + 1 < argc) display_id_override = argv[++i];
         else if (a == "--station" && i + 1 < argc) station_arg = argv[++i];
+        else if (a == "--manifest") print_manifest = true;
         else if (a == "--demo") demo = true;
         else if (a == "--demo-minimal") { demo = true; demo_minimal = true; }
         else if (a == "--help" || a == "-h") { Usage(argv[0]); return 0; }
@@ -182,17 +189,21 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (!layout_override.empty()) cfg.layout_path = layout_override;
-    if (eva_override != 0) cfg.eva = eva_override;
-    // --station takes a number as an EVA, anything else as a name to resolve.
-    std::string station_query;
+
+    // For the hub, at its startup: no panel, no layout, no database.
+    if (print_manifest) {
+        std::printf("%s\n", BuildDbManifest(DbDeviceInfo{}, std::to_string(cfg.eva)).dump(2).c_str());
+        return 0;
+    }
+
+    // The station: --station (EVA number, name or DS100), else --eva, else
+    // renderer.json. Home Assistant can change it at runtime through the hub.
+    const bool station_pinned = !station_arg.empty() || eva_override != 0;
+    std::string initial_station = std::to_string(eva_override != 0 ? eva_override : cfg.eva);
     {
         size_t b = station_arg.find_first_not_of(" \t");
         size_t e = station_arg.find_last_not_of(" \t");
-        const std::string st = b == std::string::npos ? "" : station_arg.substr(b, e - b + 1);
-        if (!st.empty() && st.find_first_not_of("0123456789") == std::string::npos)
-            cfg.eva = std::atoi(st.c_str());
-        else
-            station_query = st;
+        if (b != std::string::npos) initial_station = station_arg.substr(b, e - b + 1);
     }
     if (!display_id_override.empty()) cfg.display_id = display_id_override;
     if (cfg.display_id.empty()) {
@@ -275,6 +286,34 @@ int main(int argc, char **argv) {
         bool has_new = false;
     } shared;
 
+    // ---- control: Home Assistant, through the hub --------------------------
+    // The hub publishes this program's controls (--manifest) and hands the
+    // station over at launch and on every change; the fetch thread picks a
+    // new one up within 250 ms.
+    struct StationRequest {
+        std::mutex mtx;
+        std::string value;
+        std::atomic<uint64_t> generation{0};
+    } station_req;
+    station_req.value = initial_station;
+    DbHubLink hub([&station_req](const std::string &station) {
+        {
+            std::lock_guard<std::mutex> lk(station_req.mtx);
+            station_req.value = station;
+        }
+        station_req.generation.fetch_add(1);
+    }, station_pinned);
+    hub.Update([&](DbDisplayState &s) { s.station = initial_station; });
+    ControlChannel channel;
+    if (!demo) {
+        if (hub.Start(&channel))
+            std::fprintf(stderr, "renderer: station from Home Assistant via the hub%s\n",
+                         station_pinned ? " (the command line wins at startup)" : "");
+        else
+            std::fprintf(stderr, "renderer: not started by the hub -- showing '%s'\n",
+                         initial_station.c_str());
+    }
+
     std::thread fetch;
     if (demo) {
         std::fprintf(stderr, "renderer: demo mode, no database\n");
@@ -291,13 +330,11 @@ int main(int argc, char **argv) {
         db.user = cfg.db_user; db.password = cfg.db_password; db.eva = cfg.eva;
         db.grace_seconds = cfg.departure_grace_seconds;
         // Never log db.password.
-        const std::string station_desc = station_query.empty()
-            ? "eva=" + std::to_string(db.eva) : "station '" + station_query + "'";
-        std::fprintf(stderr, "renderer: live mode, %s@%s:%s/%s %s, on NOTIFY "
+        std::fprintf(stderr, "renderer: live mode, %s@%s:%s/%s station '%s', on NOTIFY "
                              "(fallback every %ds) (credentials from %s)\n",
                      db.user.empty() ? "<no user>" : db.user.c_str(),
                      db.host.c_str(), db.port.c_str(), db.dbname.c_str(),
-                     station_desc.c_str(), cfg.refresh_seconds,
+                     initial_station.c_str(), cfg.refresh_seconds,
                      cfg.env_file_used.empty() ? "the environment"
                                                : cfg.env_file_used.c_str());
         if (db.user.empty())
@@ -305,119 +342,164 @@ int main(int argc, char **argv) {
                 "renderer: WARNING no DB_PG_USER set -- copy config/.env.example "
                 "to config/.env and fill it in, or pass --demo.\n");
 
-        fetch = std::thread([&shared, db, &cfg, station_query]() mutable {
+        fetch = std::thread([&shared, db, &cfg, &station_req, &hub]() mutable {
             using clock = std::chrono::steady_clock;
             const auto stopping = [] { return g_stop.load(std::memory_order_relaxed); };
 
-            // Re-query on the fetcher's NOTIFY instead of on a timer. The
-            // timer stays as a slow fallback; departures still expire and
-            // countdowns still tick every frame, independent of fetches.
-            DbLiveSession live(db, cfg.display_id, station_query);
-            // Until a station given by name is resolved there is nothing to
-            // query; the board says so instead.
-            std::string shown_state;
-            auto show_station_state = [&shared, &live, &shown_state] {
-                const std::string msg = live.resolve_error().empty()
-                                            ? "Bahnhof wird gesucht ..." : live.resolve_error();
-                if (msg == shown_state) return;
-                shown_state = msg;
-                FrameData fd;
-                fd.station = live.station_query();
-                Departure d = NoDeparturesPlaceholder();
-                d.dest = msg;
-                fd.departures.push_back(d);
-                std::lock_guard<std::mutex> lk(shared.mtx);
-                shared.data = std::move(fd);
-                shared.has_new = true;
-            };
-            if (!live.resolved()) show_station_state();
-            auto next_resolution_check = clock::now();
-            const auto refresh_every   = std::chrono::seconds(cfg.refresh_seconds);
-            const auto heartbeat_every = std::chrono::seconds(cfg.heartbeat_seconds);
-            auto next_refresh   = clock::now();
-            auto next_heartbeat = clock::now() + heartbeat_every;
-            bool want_fetch = true;
-
+            // One DB session per station: when Home Assistant picks another
+            // one, the session ends (unsubscribing) and a new one starts.
             while (!stopping()) {
-                bool fresh = false;
-                if (!live.EnsureConnected(&fresh)) {
-                    // Retried with backoff inside; just stay responsive to stop.
-                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
-                    continue;
+                std::string station;
+                uint64_t generation;
+                {
+                    std::lock_guard<std::mutex> lk(station_req.mtx);
+                    station = station_req.value;
+                    generation = station_req.generation.load();
                 }
-                if (fresh) {
-                    want_fetch = true;   // whatever was announced while down is lost
-                    next_heartbeat = clock::now() + heartbeat_every;
-                }
+                const auto changed = [&station_req, generation] {
+                    return station_req.generation.load() != generation;
+                };
+                // A number is an EVA; anything else is resolved by name.
+                DBConnectionConfig sdb = db;
+                std::string query;
+                if (!station.empty() && station.find_first_not_of("0123456789") == std::string::npos)
+                    sdb.eva = std::atoi(station.c_str());
+                else
+                    query = station;
+                std::fprintf(stderr, "renderer: station '%s'\n", station.c_str());
+                hub.Update([&](DbDisplayState &s) {
+                    s.station = station;
+                    s.station_name.clear();
+                    s.next_departure.clear();
+                    s.status = query.empty() ? "ok" : "Bahnhof wird gesucht ...";
+                });
 
-                auto now = clock::now();
-                if (now >= next_heartbeat) {
-                    next_heartbeat = now + heartbeat_every;
-                    if (!live.Heartbeat()) continue;
-                }
+                // Re-query on the fetcher's NOTIFY instead of on a timer. The
+                // timer stays as a slow fallback; departures still expire and
+                // countdowns still tick every frame, independent of fetches.
+                DbLiveSession live(sdb, cfg.display_id, query);
+                // Until a station given by name is resolved there is nothing to
+                // query; the board says so instead.
+                std::string shown_state;
+                auto show_station_state = [&shared, &live, &shown_state, &hub] {
+                    const std::string msg = live.resolve_error().empty()
+                                                ? "Bahnhof wird gesucht ..." : live.resolve_error();
+                    if (msg == shown_state) return;
+                    shown_state = msg;
+                    hub.Update([&](DbDisplayState &s) { s.status = msg; });
+                    FrameData fd;
+                    fd.station = live.station_query();
+                    Departure d = NoDeparturesPlaceholder();
+                    d.dest = msg;
+                    fd.departures.push_back(d);
+                    std::lock_guard<std::mutex> lk(shared.mtx);
+                    shared.data = std::move(fd);
+                    shared.has_new = true;
+                };
+                if (!live.resolved()) show_station_state();
+                auto next_resolution_check = clock::now();
+                const auto refresh_every   = std::chrono::seconds(cfg.refresh_seconds);
+                const auto heartbeat_every = std::chrono::seconds(cfg.heartbeat_seconds);
+                auto next_refresh   = clock::now();
+                auto next_heartbeat = clock::now() + heartbeat_every;
+                bool want_fetch = true;
+                bool connected_reported = true;
 
-                if (!live.resolved()) {
-                    // Waiting for the fetcher (NOTIFY station_resolved), with a
-                    // slow poll in case the notification is lost.
-                    if (want_fetch || now >= next_resolution_check) {
-                        next_resolution_check = now + std::chrono::seconds(5);
-                        want_fetch = false;
-                        live.CheckResolution();
-                    }
-                    if (!live.resolved()) show_station_state();
-                }
-                // Resolved just now -- by the fetcher, or from the stations
-                // table while connecting.
-                if (live.resolved() && db.eva != live.eva()) {
-                    db.eva = live.eva();
-                    want_fetch = true;
-                }
-
-                if (live.resolved() && (want_fetch || now >= next_refresh)) {
-                    FetchedStationInfo st;
-                    std::vector<FetchedDeparture> fetched;
-                    std::string ticker;
-                    const int n = FetchDeparturesOn(live.conn(), db, st, fetched, ticker);
-                    if (n >= 0) {
-                        FrameData fd;
-                        fd.station = st.name;
-                        fd.ticker  = ticker;
-                        for (const auto &f : fetched) {
-                            Departure d;
-                            d.platform = f.platform; d.cPlatform = f.cPlatform;
-                            d.line = f.line; d.dest = f.dest;
-                            d.pTime = f.pTime; d.cTime = f.cTime; d.stops = f.stops;
-                            d.departAt = f.departAt;
-                            d.cancelled = f.cancelled; d.category = f.category;
-                            d.destChanged = f.destChanged; d.stop_id = f.stop_id;
-                            d.wings = f.wings;
-                            for (const auto &fn : f.notes) d.notes.push_back({fn.id, fn.text});
-                            fd.departures.push_back(std::move(d));
+                while (!stopping() && !changed()) {
+                    bool fresh = false;
+                    if (!live.EnsureConnected(&fresh)) {
+                        if (connected_reported) {
+                            connected_reported = false;
+                            hub.Update([](DbDisplayState &s) { s.status = "Keine Verbindung zur Datenbank"; });
                         }
-                        std::lock_guard<std::mutex> lk(shared.mtx);
-                        shared.data = std::move(fd);
-                        shared.has_new = true;
-                    } else {
-                        std::fprintf(stderr, "renderer: DB refresh failed, keeping previous data\n");
+                        // Retried with backoff inside; just stay responsive to stop.
+                        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                        continue;
                     }
-                    want_fetch = false;
-                    now = clock::now();
-                    next_refresh = now + refresh_every;
-                }
+                    connected_reported = true;
+                    if (fresh) {
+                        want_fetch = true;   // whatever was announced while down is lost
+                        next_heartbeat = clock::now() + heartbeat_every;
+                    }
 
-                // Block on the connection's socket until a notification, the
-                // next timer, or at most 250 ms so a stop request is seen.
-                const auto until = std::min(live.resolved() ? next_refresh : next_resolution_check,
-                                            next_heartbeat);
-                const auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    until - now).count();
-                const int timeout = static_cast<int>(std::max<long long>(
-                    0, std::min<long long>(wait_ms, 250)));
-                if (live.WaitForUpdate(timeout) == DbLiveSession::Wait::kNotified)
-                    want_fetch = true;
+                    auto now = clock::now();
+                    if (now >= next_heartbeat) {
+                        next_heartbeat = now + heartbeat_every;
+                        if (!live.Heartbeat()) continue;
+                    }
+
+                    if (!live.resolved()) {
+                        // Waiting for the fetcher (NOTIFY station_resolved), with a
+                        // slow poll in case the notification is lost.
+                        if (want_fetch || now >= next_resolution_check) {
+                            next_resolution_check = now + std::chrono::seconds(5);
+                            want_fetch = false;
+                            live.CheckResolution();
+                        }
+                        if (!live.resolved()) show_station_state();
+                    }
+                    // Resolved just now -- by the fetcher, or from the stations
+                    // table while connecting.
+                    if (live.resolved() && sdb.eva != live.eva()) {
+                        sdb.eva = live.eva();
+                        want_fetch = true;
+                    }
+
+                    if (live.resolved() && (want_fetch || now >= next_refresh)) {
+                        FetchedStationInfo st;
+                        std::vector<FetchedDeparture> fetched;
+                        std::string ticker;
+                        const int n = FetchDeparturesOn(live.conn(), sdb, st, fetched, ticker);
+                        if (n >= 0) {
+                            FrameData fd;
+                            fd.station = st.name;
+                            fd.ticker  = ticker;
+                            for (const auto &f : fetched) {
+                                Departure d;
+                                d.platform = f.platform; d.cPlatform = f.cPlatform;
+                                d.line = f.line; d.dest = f.dest;
+                                d.pTime = f.pTime; d.cTime = f.cTime; d.stops = f.stops;
+                                d.departAt = f.departAt;
+                                d.cancelled = f.cancelled; d.category = f.category;
+                                d.destChanged = f.destChanged; d.stop_id = f.stop_id;
+                                d.wings = f.wings;
+                                for (const auto &fn : f.notes) d.notes.push_back({fn.id, fn.text});
+                                fd.departures.push_back(std::move(d));
+                            }
+                            const std::string next = NextDepartureText(fd.departures);
+                            hub.Update([&](DbDisplayState &s) {
+                                s.station_name = st.name;
+                                s.status = "ok";
+                                s.next_departure = next;
+                                s.last_update = static_cast<int64_t>(std::time(nullptr));
+                            });
+                            std::lock_guard<std::mutex> lk(shared.mtx);
+                            shared.data = std::move(fd);
+                            shared.has_new = true;
+                        } else {
+                            std::fprintf(stderr, "renderer: DB refresh failed, keeping previous data\n");
+                            hub.Update([](DbDisplayState &s) { s.status = "Datenbankabfrage fehlgeschlagen"; });
+                        }
+                        want_fetch = false;
+                        now = clock::now();
+                        next_refresh = now + refresh_every;
+                    }
+
+                    // Block on the connection's socket until a notification, the
+                    // next timer, or at most 250 ms so a stop request or a new
+                    // station is seen.
+                    const auto until = std::min(live.resolved() ? next_refresh : next_resolution_check,
+                                                next_heartbeat);
+                    const auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        until - now).count();
+                    const int timeout = static_cast<int>(std::max<long long>(
+                        0, std::min<long long>(wait_ms, 250)));
+                    if (live.WaitForUpdate(timeout) == DbLiveSession::Wait::kNotified)
+                        want_fetch = true;
+                }
+                // `live` unsubscribes in its destructor, so the fetcher stops
+                // fetching a temporary station without waiting for the TTL.
             }
-            // `live` unsubscribes in its destructor, so the fetcher stops
-            // fetching a temporary station without waiting for the TTL.
         });
 #endif  // HAVE_LIBPQ
     }
@@ -468,6 +550,7 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "renderer: stopping after %llu frames\n",
                  (unsigned long long)frames);
     if (fetch.joinable()) fetch.join();
+    channel.Stop();
     watcher.Stop();
     shm.Close();
     return 0;

@@ -463,20 +463,41 @@ LED_Panel_Controller can launch it like any other. Add to the hub's
 `config/config.yaml`:
 
 ```yaml
-  trainboard:
+  db_display:
     name: Train Departure Board
-    command: /home/pi/led-refactor/start.sh --eva {subprogram} {matrix_options}
+    command: /home/pi/led-refactor/start.sh {matrix_options}
+    manifest: /home/pi/led-refactor/start.sh --manifest
     subprograms:
-      "8005708": { name: Steinheim (Westf) }
-      "8000297": { name: Paderborn Hbf }
-      "8002549": { name: Hamburg Hbf }
+      steinheim: { name: Steinheim (Westf), settings: { station: "8005708" } }
+      paderborn: { name: Paderborn Hbf, settings: { station: "8000297" } }
+      hamburg: { name: Hamburg Hbf, settings: { station: "Hamburg Hbf" } }
 ```
 
 `{matrix_options}` renders to rpi-rgb-led-matrix's own `--led-*` flags
-(`MatrixConfig.as_cli_args`), which `start.sh` routes to the driver; `--eva`
-goes to the renderer. Everything else it does not recognise is logged and
-ignored rather than being fatal — a display program that refuses to start is
-worse than one that ignores an argument.
+(`MatrixConfig.as_cli_args`), which `start.sh` routes to the driver.
+Everything else it does not recognise is logged and ignored rather than being
+fatal — a display program that refuses to start is worse than one that
+ignores an argument.
+
+### Home Assistant
+
+The program has no MQTT code. At its startup the hub runs
+`start.sh --manifest` and publishes what it prints as a Home Assistant device,
+**DB Abfahrtstafel** (see the hub's `docs/program-controls.md`):
+
+| entity | |
+|---|---|
+| `text.db_display_station` | the station: EVA number (`8002549`), name (`Hamburg Dammtor`) or DS100 (`AH`) |
+| `sensor.db_display_station_name` | the station actually shown, as resolved |
+| `sensor.db_display_next_departure` | `RE 7 Kiel Hbf 04:03 (04:08)` |
+| `sensor.db_display_status` | `ok`, `Bahnhof wird gesucht ...`, or what went wrong |
+| `sensor.db_display_last_update` | time of the last successful query |
+
+The hub keeps the station across restarts and hands it over at launch;
+changing it while the board runs switches within a quarter of a second (a new
+database session: resolve, subscribe, query). Subprograms are presets: their
+`settings` are applied before the launch. `--station`/`--eva` on the command
+line still work and win at startup.
 
 Three properties of the hub shape the script
 (`led_controller/process_manager.py`), and each is a way to get this wrong:

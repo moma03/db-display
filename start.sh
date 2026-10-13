@@ -5,6 +5,7 @@
 #
 #   ./start.sh --eva 8002549 --led-rows=64 --led-cols=128 ... [--demo]
 #   ./start.sh --station "Hamburg Dammtor" --led-rows=64 ...
+#   ./start.sh --manifest   (the hub, at startup: what to show in Home Assistant)
 #
 # The hub runs exactly one command per program and knows nothing about how it
 # is implemented, so the split has to look like a single process from outside.
@@ -46,9 +47,11 @@ trap '' PIPE
 # --- argument routing ------------------------------------------------------
 LED_ARGS=()
 REN_ARGS=()
+MANIFEST=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --led-*)          LED_ARGS+=("$1"); shift ;;
+    --manifest)       MANIFEST=1; shift ;;
     --eva)            REN_ARGS+=(--eva "${2:-}"); shift 2 ;;
     --eva=*)          REN_ARGS+=(--eva "${1#*=}"); shift ;;
     --station)        REN_ARGS+=(--station "${2:-}"); shift 2 ;;
@@ -58,7 +61,7 @@ while [ $# -gt 0 ]; do
     --driver-config)  DRIVER_CFG="${2:-$DRIVER_CFG}"; shift 2 ;;
     --renderer-config) RENDER_CFG="${2:-$RENDER_CFG}"; shift 2 ;;
     -h|--help)
-      sed -n '3,8p' "$0" | sed 's|^# \{0,1\}||'
+      sed -n '3,9p' "$0" | sed 's|^# \{0,1\}||'
       exit 0 ;;
     *)
       # Unknown flags are reported but not fatal: the hub may grow new
@@ -80,6 +83,13 @@ if [ ! -f "$RENDER_CFG" ]; then
     echo "start.sh: no renderer config found" >&2
     exit 1
   fi
+fi
+
+# The hub asks for the manifest at its own startup: renderer only, no driver,
+# no panel, no database.
+if [ "$MANIFEST" -eq 1 ]; then
+  [ -e "$RENDERER" ] || { echo "start.sh: missing $RENDERER (did you build?)" >&2; exit 1; }
+  exec "$RENDERER" --config "$RENDER_CFG" --manifest
 fi
 
 for f in "$DRIVER" "$RENDERER" "$DRIVER_CFG" "$LAYOUT"; do

@@ -115,9 +115,11 @@ set(RENDERER_SRC
   src/renderer/departures.cpp
   src/renderer/data/db_fetcher.cpp
   src/renderer/data/db_live.cpp
+  src/renderer/control/control_channel.cpp
+  src/renderer/control/db_controls.cpp
 )
 add_executable(led_renderer ${RENDERER_SRC})
-target_include_directories(led_renderer PRIVATE src/renderer ${JSON_DIR})
+target_include_directories(led_renderer PRIVATE src/renderer src/renderer/control ${JSON_DIR})
 target_link_libraries(led_renderer PRIVATE led_common led_gfx)
 if(PQ_INCLUDE_DIR AND PQ_LIBRARY)
   target_include_directories(led_renderer PRIVATE ${PQ_INCLUDE_DIR})
@@ -135,6 +137,12 @@ target_link_libraries(led_shmgen PRIVATE led_common)
 add_executable(led_test_common src/tests/test_common.cpp)
 target_link_libraries(led_test_common PRIVATE led_common)
 add_executable(led_test_departures src/tests/test_departures.cpp src/renderer/departures.cpp)
+add_executable(led_test_controls src/tests/test_controls.cpp src/renderer/departures.cpp
+  src/renderer/control/control_channel.cpp src/renderer/control/db_controls.cpp)
+target_include_directories(led_test_controls PRIVATE src/renderer src/renderer/control ${JSON_DIR})
+find_package(Threads REQUIRED)
+target_link_libraries(led_test_controls PRIVATE Threads::Threads)
 enable_testing()
 add_test(NAME common COMMAND led_test_common)
 add_test(NAME departures COMMAND led_test_departures)
+add_test(NAME controls COMMAND led_test_controls)
