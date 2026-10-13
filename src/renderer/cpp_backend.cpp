@@ -84,6 +84,113 @@ void DrawWingBracket(Canvas *canvas, int x, int y_top, int y_bottom, const Color
 }  // namespace
 
 // ---------------------------------------------------------------------------
+// RichScroller -- ScrollingTextBox for text made of coloured segments, some
+// struck through: the hero's via line of a train on a changed route. Same
+// timing as ScrollingTextBox (wait, scroll, gap, seamless wrap), so a plain
+// via line drawn as one segment looks exactly as before.
+// ---------------------------------------------------------------------------
+struct TextSegment {
+    std::string text;
+    Color color;
+    bool strike = false;
+};
+
+class RichScroller {
+public:
+    RichScroller(Canvas *canvas, int x, int y, int w, int h, const Font &font,
+                 std::vector<TextSegment> segments, float speed, float wait, int gap)
+        : canvas_(canvas), x_(x), y_(y), w_(w), h_(h), font_(font),
+          segments_(std::move(segments)), speed_(speed), wait_(wait), gap_(gap),
+          last_(std::chrono::steady_clock::now()) {
+        led_util::NullCanvas nc;
+        width_ = Draw(&nc, 0, 0);
+    }
+
+    void SetCanvas(Canvas *c) { canvas_ = c; }
+
+    void Update() {
+        const auto now = std::chrono::steady_clock::now();
+        const float dt = std::chrono::duration<float>(now - last_).count();
+        Clip clip(canvas_, x_, y_, w_, h_);
+        const int baseline = y_ + font_.baseline();
+        if (width_ <= w_ || !scrolling_) {
+            Draw(&clip, x_, baseline);
+            if (width_ <= w_) { last_ = now; return; }
+            if (dt >= wait_) { scrolling_ = true; last_ = now; }
+            return;
+        }
+        offset_ += speed_ * dt;
+        const float start = x_ - offset_;
+        Draw(&clip, static_cast<int>(start), baseline);
+        const float wrap = start + width_ + gap_;
+        if (wrap < x_ + w_) Draw(&clip, static_cast<int>(wrap), baseline);
+        if (offset_ >= width_ + gap_) { offset_ -= width_ + gap_; scrolling_ = false; }
+        last_ = now;
+    }
+
+private:
+    // Clips drawing to the box.
+    class Clip : public Canvas {
+    public:
+        Clip(Canvas *base, int x, int y, int w, int h) : b_(base), x_(x), y_(y), w_(w), h_(h) {}
+        int width() const override { return b_->width(); }
+        int height() const override { return b_->height(); }
+        void SetPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b) override {
+            if (x >= x_ && x < x_ + w_ && y >= y_ && y < y_ + h_) b_->SetPixel(x, y, r, g, b);
+        }
+        void Clear() override {}
+        void Fill(uint8_t, uint8_t, uint8_t) override {}
+    private:
+        Canvas *b_;
+        int x_, y_, w_, h_;
+    };
+
+    // Draws every segment from `x`; returns the total width.
+    int Draw(Canvas *c, int x, int baseline) const {
+        int cursor = x;
+        for (const TextSegment &s : segments_) {
+            const int w = DrawText(c, font_, cursor, baseline, s.color, nullptr, s.text.c_str());
+            if (s.strike) {
+                const int mid_y = baseline - font_.baseline() / 2;
+                for (int px = cursor; px < cursor + w - 1; ++px)
+                    c->SetPixel(px, mid_y, s.color.r, s.color.g, s.color.b);
+            }
+            cursor += w;
+        }
+        return cursor - x;
+    }
+
+    Canvas *canvas_;
+    int x_, y_, w_, h_;
+    const Font &font_;
+    std::vector<TextSegment> segments_;
+    float speed_, wait_;
+    int gap_;
+    int width_ = 0;
+    float offset_ = 0.0f;
+    bool scrolling_ = false;
+    std::chrono::steady_clock::time_point last_;
+};
+
+// The hero's via line: plain, or -- for a train on a changed route -- dropped
+// stops struck through and new ones highlighted, in route order.
+std::vector<TextSegment> ViaSegments(const Departure &d, const Color &via,
+                                     const Color &cancelled, const Color &added) {
+    if (d.route.empty() || d.cancelled) return {{"via " + d.stops, via, false}};
+    std::vector<TextSegment> out{{"via ", via, false}};
+    for (size_t k = 0; k < d.route.size(); ++k) {
+        if (k > 0) out.push_back({", ", via, false});
+        const ViaStop &s = d.route[k];
+        switch (s.state) {
+            case ViaStop::State::kServed:    out.push_back({s.name, via, false}); break;
+            case ViaStop::State::kCancelled: out.push_back({s.name, cancelled, true}); break;
+            case ViaStop::State::kAdded:     out.push_back({s.name, added, false}); break;
+        }
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // DepartureScroller -- page scrolling that always lands on a departure.
 //
 // PageScroller advances by a fixed number of fixed-height items. Rows here are
@@ -557,10 +664,10 @@ void CppRenderBackend::BuildHero() {
             canvas_.get(), heroCols_.dest_x, big_base - bigFont.baseline(),
             heroCols_.dest_w, bigFont.height(), bigFont, destCol, hero_[i].dest,
             hw.dest_scroll.speed_px_s, hw.dest_scroll.wait_s, hw.dest_scroll.gap_px));
-        heroVias_.push_back(new ScrollingTextBox(
+        heroVias_.push_back(new RichScroller(
             canvas_.get(), heroCols_.dest_x, via_base - smallFont.baseline(),
-            heroCols_.dest_w, smallFont.height(), smallFont, hero_style_.via,
-            "via " + hero_[i].stops,
+            heroCols_.dest_w, smallFont.height(), smallFont,
+            ViaSegments(hero_[i], hero_style_.via, C(hw.color_via_cancelled), C(hw.color_via_added)),
             hw.scroll.speed_px_s, hw.scroll.wait_s, hw.scroll.gap_px));
     }
     if (!heroNotes.empty()) {

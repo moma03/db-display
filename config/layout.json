@@ -72,6 +72,9 @@
         "note":         "#FFB400",
         "delay":        "#FF3C3C",
         "dest_changed": "#FF3C3C",
+        // Changed route, hero via line: dropped stops (struck through), new ones.
+        "via_cancelled": "#FF3C3C",
+        "via_added":     "#3CDC3C",
         "bus_fg":       "#FFFF00",
         "bus_bg":       "#5A0082",
         "bus_sub":      "#BE9600",

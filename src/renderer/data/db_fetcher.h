@@ -29,6 +29,8 @@ struct FetchedDeparture {
     std::string cTime;           // changed/actual time "HH:MM" (empty if on time)
     long long   departAt = 0;    // unix seconds of the effective (changed, else planned) time
     std::string stops;           // intermediate stops, comma-separated
+    std::string plannedPath;     // pipe-separated, as planned
+    std::string changedPath;     // pipe-separated, as changed (empty if unchanged)
     std::vector<FetchedNote> notes; // delay/cancellation reason text(s)
     bool cancelled = false;      // true when changed_status == 'c'
     bool destChanged = false;    // true when changed_destination differs from planned

@@ -132,8 +132,63 @@ static void TestSameShape() {
 }
 
 // ---------------------------------------------------------------------------
+static std::string Show(const std::vector<ViaStop> &r) {
+    std::string out;
+    for (const auto &s : r) {
+        if (!out.empty()) out += " ";
+        out += (s.state == ViaStop::State::kCancelled ? "-" :
+                s.state == ViaStop::State::kAdded ? "+" : "") + s.name;
+    }
+    return out;
+}
+
+static void TestRoute() {
+    std::printf("changed route\n");
+    CHECK(SplitPath("Soest|Hamm|Kamen") == (std::vector<std::string>{"Soest", "Hamm", "Kamen"}), "split");
+    CHECK(SplitPath("").empty() && SplitPath("|").empty(), "split empty");
+
+    CHECK(DiffRoute({"A", "B"}, {"A", "B"}).empty(), "same route: nothing to show");
+    CHECK(DiffRoute({"A", "B"}, {}).empty(), "no changed route: nothing to show");
+
+    // RE 11 turned back in Essen instead of running on to Oberhausen.
+    auto r = DiffRoute({"Soest", "Hamm", "Essen", "Muelheim", "Oberhausen"},
+                       {"Soest", "Hamm", "Essen"});
+    CHECK(Show(r) == "Soest Hamm Essen -Muelheim -Oberhausen", "%s", Show(r).c_str());
+    CHECK(ClassifyRoute(r) == RouteChange::kShortened, "only shortened");
+
+    // A diversion: Kamen and Unna skipped, Werl instead, back on the route at Dortmund.
+    r = DiffRoute({"Soest", "Kamen", "Unna", "Dortmund", "Essen"},
+                  {"Soest", "Werl", "Dortmund", "Essen"});
+    CHECK(Show(r) == "Soest -Kamen -Unna +Werl Dortmund Essen", "%s", Show(r).c_str());
+    CHECK(ClassifyRoute(r) == RouteChange::kChanged, "diversion");
+
+    // Just a stop skipped in the middle.
+    r = DiffRoute({"A", "B", "C"}, {"A", "C"});
+    CHECK(Show(r) == "A -B C" && ClassifyRoute(r) == RouteChange::kChanged, "%s", Show(r).c_str());
+    // Extended beyond the planned end.
+    r = DiffRoute({"A", "B"}, {"A", "B", "C"});
+    CHECK(Show(r) == "A B +C" && ClassifyRoute(r) == RouteChange::kChanged, "%s", Show(r).c_str());
+
+    Departure d;
+    d.notes = {{12, "Reparatur an der Strecke"}};
+    ApplyRouteChange(d, "Soest|Kamen|Dortmund", "Soest|Werl|Dortmund");
+    CHECK(d.notes.size() == 2 && d.notes[0].text == "Heute anderer Zuglauf",
+          "note first: %s", d.notes.empty() ? "" : d.notes[0].text.c_str());
+    ApplyRouteChange(d, "Soest|Kamen|Dortmund", "Soest|Werl|Dortmund");
+    CHECK(d.notes.size() == 2, "note not added twice");
+    Departure e;
+    ApplyRouteChange(e, "A|B|C", "A|B");
+    CHECK(e.notes.empty() && !e.route.empty(), "shortened: route marked, no note");
+
+    Departure f = e, g = e;
+    g.route.clear();
+    CHECK(f != g && !SameShape(f, g), "a route change is a change of shape");
+}
+
+// ---------------------------------------------------------------------------
 int main() {
     TestPrune();
+    TestRoute();
     TestNextExpiry();
     TestWingPruneThenGroup();
     TestSameTrains();

@@ -320,6 +320,8 @@ int FetchDeparturesOn(PGconn *conn,
         std::string path = changedPath.empty() ? getField(res, r, cPPath) : changedPath;
         if (!path.empty())
             dep.stops = pathToStops(path);
+        dep.plannedPath = getField(res, r, cPPath);
+        dep.changedPath = changedPath;
 
         // Cancelled status
         std::string status = getField(res, r, cCStat);

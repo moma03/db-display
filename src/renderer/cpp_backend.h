@@ -144,7 +144,8 @@ private:
 
     // --- scroller state, rebuilt whenever data or layout changes ---
     std::unique_ptr<MemoryCanvas> canvas_;
-    std::vector<ScrollingTextBox *> heroDests_, heroVias_;
+    std::vector<ScrollingTextBox *> heroDests_;
+    std::vector<class RichScroller *> heroVias_;
     ScrollingTextBox *heroNote_ = nullptr;
     ScrollingTextBox *tickerScroller_ = nullptr;
     std::vector<ScrollingTextBox *> destScrollers_, noteScrollers_;

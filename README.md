@@ -479,6 +479,18 @@ Everything else it does not recognise is logged and ignored rather than being
 fatal — a display program that refuses to start is worse than one that
 ignores an argument.
 
+### Changed routes
+
+When a train's route differs from the plan, the board says so:
+
+- **Ends early or goes elsewhere** — the destination is where the changed
+  route ends, highlighted (`dest_changed`).
+- **Stops dropped or added** (not just cut short) — the note
+  *Heute anderer Zuglauf* in the reason line, and on the hero the via line
+  shows dropped stops struck through (`via_cancelled`, red) and new ones
+  highlighted (`via_added`, green), in route order. Both colours are in the
+  hero's `colors` in `layout.json`.
+
 ### Home Assistant
 
 The program has no MQTT code. At its startup the hub runs

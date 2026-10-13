@@ -12,6 +12,10 @@ bool operator==(const Note &a, const Note &b) {
     return a.id == b.id && a.text == b.text;
 }
 
+bool operator==(const ViaStop &a, const ViaStop &b) {
+    return a.name == b.name && a.state == b.state;
+}
+
 // Used to decide whether a database refresh actually changed anything.
 // An unchanged refresh must not rebuild the scrollers, because that resets
 // every scroll position and makes the board visibly jump.
@@ -23,7 +27,7 @@ bool operator==(const Departure &a, const Departure &b) {
            a.category == b.category && a.destChanged == b.destChanged &&
            a.wings == b.wings && a.wingCount == b.wingCount &&
            a.wingPos == b.wingPos && a.notes == b.notes &&
-           a.departAt == b.departAt;
+           a.departAt == b.departAt && a.route == b.route;
 }
 
 static bool StartsWithBus(const std::string &s) {
@@ -160,7 +164,73 @@ bool SameShape(const Departure &a, const Departure &b) {
            a.dest == b.dest && a.destChanged == b.destChanged &&
            a.stops == b.stops && a.notes == b.notes &&
            a.cancelled == b.cancelled && IsBus(a) == IsBus(b) &&
-           a.wingCount == b.wingCount && a.wingPos == b.wingPos;
+           a.wingCount == b.wingCount && a.wingPos == b.wingPos &&
+           a.route == b.route;
+}
+
+std::vector<std::string> SplitPath(const std::string &path) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (start <= path.size()) {
+        const size_t bar = path.find('|', start);
+        const size_t end = (bar == std::string::npos) ? path.size() : bar;
+        if (end > start) out.push_back(path.substr(start, end - start));
+        if (bar == std::string::npos) break;
+        start = bar + 1;
+    }
+    return out;
+}
+
+std::vector<ViaStop> DiffRoute(const std::vector<std::string> &planned,
+                               const std::vector<std::string> &changed) {
+    if (planned == changed || planned.empty() || changed.empty()) return {};
+    const size_t n = planned.size(), m = changed.size();
+    // lcs[i][j]: common stops of planned[i..] and changed[j..]. Routes are a
+    // few dozen stops, so the table is small.
+    std::vector<std::vector<int>> lcs(n + 1, std::vector<int>(m + 1, 0));
+    for (size_t i = n; i-- > 0;)
+        for (size_t j = m; j-- > 0;)
+            lcs[i][j] = planned[i] == changed[j] ? lcs[i + 1][j + 1] + 1
+                                                 : std::max(lcs[i + 1][j], lcs[i][j + 1]);
+    std::vector<ViaStop> out;
+    size_t i = 0, j = 0;
+    while (i < n || j < m) {
+        if (i < n && j < m && planned[i] == changed[j]) {
+            out.push_back({planned[i], ViaStop::State::kServed});
+            ++i; ++j;
+        } else if (j == m || (i < n && lcs[i + 1][j] >= lcs[i][j + 1])) {
+            // Dropped stops first, then their replacements.
+            out.push_back({planned[i], ViaStop::State::kCancelled});
+            ++i;
+        } else {
+            out.push_back({changed[j], ViaStop::State::kAdded});
+            ++j;
+        }
+    }
+    return out;
+}
+
+RouteChange ClassifyRoute(const std::vector<ViaStop> &route) {
+    bool any = false, served_after_cancel = false, cancelled_seen = false;
+    for (const ViaStop &s : route) {
+        if (s.state == ViaStop::State::kAdded) return RouteChange::kChanged;
+        if (s.state == ViaStop::State::kCancelled) { any = cancelled_seen = true; continue; }
+        if (cancelled_seen) served_after_cancel = true;
+    }
+    if (!any) return RouteChange::kNone;
+    // Only the tail dropped: the train ends early.
+    return served_after_cancel ? RouteChange::kChanged : RouteChange::kShortened;
+}
+
+void ApplyRouteChange(Departure &d, const std::string &planned_path,
+                      const std::string &changed_path) {
+    d.route = DiffRoute(SplitPath(planned_path), SplitPath(changed_path));
+    if (ClassifyRoute(d.route) != RouteChange::kChanged) return;
+    static const char *kText = "Heute anderer Zuglauf";
+    for (const Note &n : d.notes)
+        if (n.text == kText) return;
+    // First, ahead of any delay reason: it is what changes the trip.
+    d.notes.insert(d.notes.begin(), Note{-2, kText});
 }
 
 Departure NoDeparturesPlaceholder() {

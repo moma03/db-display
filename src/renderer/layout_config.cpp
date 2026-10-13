@@ -200,6 +200,8 @@ bool LoadLayoutConfig(const std::string &path, LayoutConfig *out, std::string *e
                 if (!GetColor(c, "note", &w.color_note,  &ctx)) return false;
                 if (!GetColor(c, "delay", &w.color_delay, &ctx)) return false;
                 if (!GetColor(c, "dest_changed", &w.color_dest_changed, &ctx)) return false;
+                if (!GetColor(c, "via_cancelled", &w.color_via_cancelled, &ctx)) return false;
+                if (!GetColor(c, "via_added", &w.color_via_added, &ctx)) return false;
                 if (!GetColor(c, "bus_fg",    &w.bus_fg,    &ctx)) return false;
                 if (!GetColor(c, "bus_bg",    &w.bus_bg,    &ctx)) return false;
                 if (!GetColor(c, "bus_sub",   &w.bus_sub,   &ctx)) return false;

@@ -16,6 +16,21 @@ namespace led {
 
 struct Note { int id = 0; std::string text; };
 
+// One stop of a route that differs from the plan, for the hero's via line.
+struct ViaStop {
+    enum class State { kServed, kCancelled, kAdded };
+    std::string name;
+    State state = State::kServed;
+};
+bool operator==(const ViaStop &a, const ViaStop &b);
+
+// How a changed route relates to the planned one.
+enum class RouteChange {
+    kNone,        // same stops
+    kShortened,   // ends early, nothing else (the changed destination says it all)
+    kChanged,     // stops dropped and/or added: "Heute anderer Zuglauf"
+};
+
 struct Departure {
     std::string platform, cPlatform, line, dest;
     std::string pTime, cTime, stops;
@@ -25,6 +40,9 @@ struct Departure {
     bool destChanged = false;    // destination differs from the planned one
     std::string stop_id;         // "<tripId>-<stopIndex>"
     std::string wings;           // pipe-separated trip ids of coupled parts
+    // Planned and changed stops merged, when the route differs from the plan
+    // (see ApplyRouteChange); empty otherwise.
+    std::vector<ViaStop> route;
     int64_t departAt = 0;        // unix seconds of the effective departure
                                  // (changed time, else planned); 0 = never expires
 
@@ -53,6 +71,22 @@ int HeroGroupSize(const std::vector<Departure> &list);
 // pruned simply brings the row back on the next fetch. Run on the ungrouped
 // list, before GroupWings(), so wing positions are computed on what remains.
 void PruneDeparted(std::vector<Departure> &list, int64_t now, int grace_s);
+
+// Splits a pipe-separated path ("Soest|Hamm(Westf)Hbf|Kamen") into stops.
+std::vector<std::string> SplitPath(const std::string &path);
+
+// Planned and changed stops merged in order: kept stops as kServed, dropped
+// ones as kCancelled, new ones as kAdded (a longest-common-subsequence diff,
+// so a detour shows where it leaves and rejoins the planned route). Empty
+// when the two are the same.
+std::vector<ViaStop> DiffRoute(const std::vector<std::string> &planned,
+                               const std::vector<std::string> &changed);
+RouteChange ClassifyRoute(const std::vector<ViaStop> &route);
+
+// Fills d.route from the planned and changed path, and for a changed route
+// (not merely shortened) adds the note "Heute anderer Zuglauf".
+void ApplyRouteChange(Departure &d, const std::string &planned_path,
+                      const std::string &changed_path);
 
 // Wall-clock second at which PruneDeparted() will next remove something, or
 // INT64_MAX if nothing in `list` ever expires.

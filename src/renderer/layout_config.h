@@ -59,6 +59,9 @@ struct Widget {
     Rgb  color_note{255, 180, 0};
     Rgb  color_delay{255, 60, 60};
     Rgb  color_dest_changed{255, 60, 60};
+    // Hero via line of a train on a changed route.
+    Rgb  color_via_cancelled{255, 60, 60};   // dropped stops, also struck through
+    Rgb  color_via_added{60, 220, 60};       // stops not in the plan
     // Bus and cancelled rows invert or tint; these are their palettes.
     Rgb  bus_fg{255, 255, 0};
     Rgb  bus_bg{90, 0, 130};

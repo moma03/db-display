@@ -464,6 +464,7 @@ int main(int argc, char **argv) {
                                 d.destChanged = f.destChanged; d.stop_id = f.stop_id;
                                 d.wings = f.wings;
                                 for (const auto &fn : f.notes) d.notes.push_back({fn.id, fn.text});
+                                if (!f.cancelled) ApplyRouteChange(d, f.plannedPath, f.changedPath);
                                 fd.departures.push_back(std::move(d));
                             }
                             const std::string next = NextDepartureText(fd.departures);
